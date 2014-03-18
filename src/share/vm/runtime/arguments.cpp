@@ -861,9 +861,11 @@ bool Arguments::process_argument(const char* arg,
   bool has_plus_minus = (*arg == '+' || *arg == '-');
   const char* const argname = has_plus_minus ? arg + 1 : arg;
   if (is_newly_obsolete(arg, &since)) {
-    char version[256];
-    since.to_string(version, sizeof(version));
-    warning("ignoring option %s; support was removed in %s", argname, version);
+    if (JDK_Version::current().compare(since) >= 0) {
+      char version[256];
+      since.to_string(version, sizeof(version));
+      warning("ignoring option %s; support was removed in %s", argname, version);
+    }
     return true;
   }
 
