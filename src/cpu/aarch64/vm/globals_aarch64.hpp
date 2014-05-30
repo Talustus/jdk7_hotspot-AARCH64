@@ -49,7 +49,7 @@ define_pd_global(bool, UncommonNullCast,         true);  // Uncommon-trap NULLs 
 // the uep and the vep doesn't get real alignment but just slops on by
 // only assured that the entry instruction meets the 5 byte size requirement.
 #ifdef COMPILER2
-define_pd_global(intx, CodeEntryAlignment,       32);
+define_pd_global(intx, CodeEntryAlignment,       64);
 #else
 define_pd_global(intx, CodeEntryAlignment,       16);
 #endif // COMPILER2
@@ -72,9 +72,6 @@ define_pd_global(bool, UseMembar,            true);
 define_pd_global(uintx, CMSYoungGenPerWorker, 64*M);  // default max size of CMS young gen, per GC worker thread
 
 define_pd_global(uintx, TypeProfileLevel, 0);
-
-// avoid biased locking while we are bootstrapping the aarch64 build
-define_pd_global(bool, UseBiasedLocking, false);
 
 #if defined(COMPILER1) || defined(COMPILER2)
 define_pd_global(intx, InlineSmallCode,          1000);

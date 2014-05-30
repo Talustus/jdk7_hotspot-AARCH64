@@ -135,8 +135,16 @@ class StubGenerator: public StubCodeGenerator {
   //     [ return_from_Java     ] <--- sp
   //     [ argument word n      ]
   //      ...
-  // -19 [ argument word 1      ]
-  // -18 [ saved r28            ] <--- sp_after_call
+  // -27 [ argument word 1      ]
+  // -26 [ saved d15            ] <--- sp_after_call
+  // -25 [ saved d14            ]
+  // -24 [ saved d13            ]
+  // -23 [ saved d12            ]
+  // -22 [ saved d11            ]
+  // -21 [ saved d10            ]
+  // -20 [ saved d9             ]
+  // -19 [ saved d8             ]
+  // -18 [ saved r28            ]
   // -17 [ saved r27            ]
   // -16 [ saved r26            ]
   // -15 [ saved r25            ]
@@ -159,7 +167,17 @@ class StubGenerator: public StubCodeGenerator {
 
   // Call stub stack layout word offsets from fp
   enum call_stub_layout {
-    sp_after_call_off = -18,
+    sp_after_call_off = -26,
+
+    d15_off            = -26,
+    d14_off            = -25,
+    d13_off            = -24,
+    d12_off            = -23,
+    d11_off            = -22,
+    d10_off            = -21,
+    d9_off             = -20,
+    d8_off             = -19,
+
     r28_off            = -18,
     r27_off            = -17,
     r26_off            = -16,
@@ -202,6 +220,15 @@ class StubGenerator: public StubCodeGenerator {
 
     const Address thread        (rfp, thread_off         * wordSize);
 
+    const Address d15_save      (rfp, d15_off * wordSize);
+    const Address d14_save      (rfp, d14_off * wordSize);
+    const Address d13_save      (rfp, d13_off * wordSize);
+    const Address d12_save      (rfp, d12_off * wordSize);
+    const Address d11_save      (rfp, d11_off * wordSize);
+    const Address d10_save      (rfp, d10_off * wordSize);
+    const Address d9_save       (rfp, d9_off * wordSize);
+    const Address d8_save       (rfp, d8_off * wordSize);
+
     const Address r28_save      (rfp, r28_off * wordSize);
     const Address r27_save      (rfp, r27_off * wordSize);
     const Address r26_save      (rfp, r26_off * wordSize);
@@ -220,11 +247,8 @@ class StubGenerator: public StubCodeGenerator {
 
     address aarch64_entry = __ pc();
 
-// AED: this should fix Ed's problem -- we only save the sender's SP for our sim
 #ifdef BUILTIN_SIM
     // Save sender's SP for stack traces.
-// ECN: FIXME
-// #if 0
     __ mov(rscratch1, sp);
     __ str(rscratch1, Address(__ pre(sp, -2 * wordSize)));
 #endif
@@ -253,6 +277,15 @@ class StubGenerator: public StubCodeGenerator {
     __ str(r26,      r26_save);
     __ str(r27,      r27_save);
     __ str(r28,      r28_save);
+
+    __ strd(v8,      d8_save);
+    __ strd(v9,      d9_save);
+    __ strd(v10,     d10_save);
+    __ strd(v11,     d11_save);
+    __ strd(v12,     d12_save);
+    __ strd(v13,     d13_save);
+    __ strd(v14,     d14_save);
+    __ strd(v15,     d15_save);
 
     // install Java thread in global register now we have saved
     // whatever value it held
@@ -358,6 +391,15 @@ class StubGenerator: public StubCodeGenerator {
 #endif
 
     // restore callee-save registers
+    __ ldrd(v15,      d15_save);
+    __ ldrd(v14,      d14_save);
+    __ ldrd(v13,      d13_save);
+    __ ldrd(v12,      d12_save);
+    __ ldrd(v11,      d11_save);
+    __ ldrd(v10,      d10_save);
+    __ ldrd(v9,       d9_save);
+    __ ldrd(v8,       d8_save);
+
     __ ldr(r28,      r28_save);
     __ ldr(r27,      r27_save);
     __ ldr(r26,      r26_save);
@@ -414,7 +456,7 @@ class StubGenerator: public StubCodeGenerator {
   // not the case if the callee is compiled code => need to setup the
   // rsp.
   //
-  // rax: exception oop
+  // r0: exception oop
 
   // NOTE: this is used as a target from the signal handler so it
   // needs an x86 prolog which returns into the current simulator
@@ -763,7 +805,7 @@ class StubGenerator: public StubCodeGenerator {
     __ bind(error);
     __ ldp(c_rarg3, c_rarg2, Address(__ post(sp, 16)));
 
-    __ push(0x7fffffff, sp);
+    __ push(RegSet::range(r0, r29), sp);
     // debug(char* msg, int64_t pc, int64_t regs[])
     __ ldr(c_rarg0, Address(sp, rscratch1->encoding()));    // pass address of error message
     __ mov(c_rarg1, Address(sp, lr));             // pass return address
@@ -774,7 +816,7 @@ class StubGenerator: public StubCodeGenerator {
     BLOCK_COMMENT("call MacroAssembler::debug");
     __ mov(rscratch1, CAST_FROM_FN_PTR(address, MacroAssembler::debug64));
     __ blrt(rscratch1, 3, 0, 1);
-    __ pop(0x7fffffff, sp);
+    __ pop(RegSet::range(r0, r29), sp);
 
     __ ldp(rscratch2, lr, Address(__ post(sp, 2 * wordSize)));
     __ ldp(r0, rscratch1, Address(__ post(sp, 2 * wordSize)));
@@ -808,21 +850,6 @@ class StubGenerator: public StubCodeGenerator {
   void array_overlap_test(Label& L_no_overlap, Address::sxtw sf) { __ b(L_no_overlap); }
   void array_overlap_test(address no_overlap_target, Label* NOLp, int sf) { Unimplemented(); }
 
-  // Shuffle first three arg regs on Windows into Linux/Solaris locations.
-  //
-  // Outputs:
-  //    rdi - rcx
-  //    rsi - rdx
-  //    rdx - r8
-  //    rcx - r9
-  //
-  // Registers r9 and r10 are used to save rdi and rsi on Windows, which latter
-  // are non-volatile.  r9 and r10 should not be used by the caller.
-  //
-  void setup_arg_regs(int nargs = 3) { Unimplemented(); }
-
-  void restore_arg_regs() { Unimplemented(); }
-
   // Generate code for an array write pre barrier
   //
   //     addr    -  starting address
@@ -838,7 +865,7 @@ class StubGenerator: public StubCodeGenerator {
     case BarrierSet::G1SATBCTLogging:
       // With G1, don't generate the call if we statically know that the target in uninitialized
       if (!dest_uninitialized) {
-	__ push(0x3fffffff, sp);         // integer registers except lr & sp
+	__ push(RegSet::range(r0, r29), sp);         // integer registers except lr & sp
 	if (count == c_rarg0) {
 	  if (addr == c_rarg1) {
 	    // exactly backwards!!
@@ -853,7 +880,7 @@ class StubGenerator: public StubCodeGenerator {
 	  __ mov(c_rarg1, count);
 	}
 	__ call_VM_leaf(CAST_FROM_FN_PTR(address, BarrierSet::static_write_ref_array_pre), 2);
-	__ pop(0x3fffffff, sp);         // integer registers except lr & sp        }
+	__ pop(RegSet::range(r0, r29), sp);         // integer registers except lr & sp        }
 	break;
       case BarrierSet::CardTableModRef:
       case BarrierSet::CardTableExtension:
@@ -884,7 +911,7 @@ class StubGenerator: public StubCodeGenerator {
       case BarrierSet::G1SATBCTLogging:
 
         {
-	  __ push(0x3fffffff, sp);         // integer registers except lr & sp
+	  __ push(RegSet::range(r0, r29), sp);         // integer registers except lr & sp
           // must compute element count unless barrier set interface is changed (other platforms supply count)
           assert_different_registers(start, end, scratch);
           __ lea(scratch, Address(end, BytesPerHeapOop));
@@ -893,7 +920,7 @@ class StubGenerator: public StubCodeGenerator {
           __ mov(c_rarg0, start);
           __ mov(c_rarg1, scratch);
           __ call_VM_leaf(CAST_FROM_FN_PTR(address, BarrierSet::static_write_ref_array_post), 2);
-	  __ pop(0x3fffffff, sp);         // integer registers except lr & sp        }
+	  __ pop(RegSet::range(r0, r29), sp);         // integer registers except lr & sp        }
         }
         break;
       case BarrierSet::CardTableModRef:
@@ -1256,13 +1283,13 @@ class StubGenerator: public StubCodeGenerator {
     }
     __ enter();
     if (is_oop) {
-      __ push(d->bit() | count->bit(), sp);
+      __ push(RegSet::of(d, count), sp);
       // no registers are destroyed by this call
       gen_write_ref_array_pre_barrier(d, count, dest_uninitialized);
     }
     copy_memory(aligned, s, d, count, rscratch1, size);
     if (is_oop) {
-      __ pop(d->bit() | count->bit(), sp);
+      __ pop(RegSet::of(d, count), sp);
       if (VerifyOops)
 	verify_oop_array(size, d, count, r16);
       __ sub(count, count, 1); // make an inclusive end pointer
@@ -1308,13 +1335,13 @@ class StubGenerator: public StubCodeGenerator {
 
     __ enter();
     if (is_oop) {
-      __ push(d->bit() | count->bit(), sp);
+      __ push(RegSet::of(d, count), sp);
       // no registers are destroyed by this call
       gen_write_ref_array_pre_barrier(d, count, dest_uninitialized);
     }
     copy_memory(aligned, s, d, count, rscratch1, -size);
     if (is_oop) {
-      __ pop(d->bit() | count->bit(), sp);
+      __ pop(RegSet::of(d, count), sp);
       if (VerifyOops)
 	verify_oop_array(size, d, count, r16);
       __ sub(count, count, 1); // make an inclusive end pointer
@@ -1640,7 +1667,7 @@ class StubGenerator: public StubCodeGenerator {
      // Empty array:  Nothing to do.
     __ cbz(count, L_done);
 
-    __ push(r18->bit() | r19->bit() | r20->bit() | r21->bit(), sp);
+    __ push(RegSet::of(r18, r19, r20, r21), sp);
 
 #ifdef ASSERT
     BLOCK_COMMENT("assert consistent ckoff/ckval");
@@ -1701,7 +1728,7 @@ class StubGenerator: public StubCodeGenerator {
     gen_write_ref_array_post_barrier(start_to, to, rscratch1);
 
     __ bind(L_done_pop);
-    __ pop(r18->bit() | r19->bit() | r20->bit()| r21->bit(), sp);
+    __ pop(RegSet::of(r18, r19, r20, r21), sp);
     inc_counter_np(SharedRuntime::_checkcast_array_copy_ctr);
 
     __ bind(L_done);
@@ -1754,8 +1781,8 @@ class StubGenerator: public StubCodeGenerator {
   //    rsp+40     -  element count (32-bits)
   //
   //  Output:
-  //    rax ==  0  -  success
-  //    rax == -1^K - failure, where K is partial transfer count
+  //    r0 ==  0  -  success
+  //    r0 == -1^K - failure, where K is partial transfer count
   //
   address generate_generic_copy(const char *name,
                                 address byte_copy_entry, address short_copy_entry,
@@ -1901,6 +1928,50 @@ class StubGenerator: public StubCodeGenerator {
     __ ret(lr);
   }
 #endif
+
+  /**
+   *  Arguments:
+   *
+   * Inputs:
+   *   c_rarg0   - int crc
+   *   c_rarg1   - byte* buf
+   *   c_rarg2   - int length
+   *
+   * Output:
+   *       r0   - int crc result
+   *
+   * Preserves:
+   *       r13
+   *
+   */
+  address generate_updateBytesCRC32() {
+    assert(UseCRC32Intrinsics, "what are we doing here?");
+
+    __ align(CodeEntryAlignment);
+    StubCodeMark mark(this, "StubRoutines", "updateBytesCRC32");
+
+    address start = __ pc();
+
+    const Register crc   = c_rarg0;  // crc
+    const Register buf   = c_rarg1;  // source java byte array address
+    const Register len   = c_rarg2;  // length
+    const Register table0 = c_rarg3; // crc_table address
+    const Register table1 = c_rarg4;
+    const Register table2 = c_rarg5;
+    const Register table3 = c_rarg6;
+    const Register tmp3 = c_rarg7;
+
+    BLOCK_COMMENT("Entry:");
+    __ enter(); // required for proper stackwalking of RuntimeStub frame
+
+    __ kernel_crc32(crc, buf, len,
+              table0, table1, table2, table3, rscratch1, rscratch2, tmp3);
+
+    __ leave(); // required for proper stackwalking of RuntimeStub frame
+    __ ret(lr);
+
+    return start;
+  }
 
 #undef __
 #define __ masm->
@@ -2071,8 +2142,8 @@ class StubGenerator: public StubCodeGenerator {
       generate_handler_for_unsafe_access();
 
     // platform dependent
-    StubRoutines::x86::_get_previous_fp_entry = generate_get_previous_fp();
-    StubRoutines::x86::_get_previous_sp_entry = generate_get_previous_sp();
+    StubRoutines::aarch64::_get_previous_fp_entry = generate_get_previous_fp();
+    StubRoutines::aarch64::_get_previous_sp_entry = generate_get_previous_sp();
 
     // Build this early so it's available for the interpreter.
     StubRoutines::_throw_StackOverflowError_entry =
@@ -2080,6 +2151,11 @@ class StubGenerator: public StubCodeGenerator {
                                CAST_FROM_FN_PTR(address,
                                                 SharedRuntime::
                                                 throw_StackOverflowError));
+    if (UseCRC32Intrinsics) {
+      // set table address before stub generation which use it
+      StubRoutines::_crc_table_adr = (address)StubRoutines::aarch64::_crc_table;
+      StubRoutines::_updateBytesCRC32 = generate_updateBytesCRC32();
+    }
   }
 
   void generate_all() {

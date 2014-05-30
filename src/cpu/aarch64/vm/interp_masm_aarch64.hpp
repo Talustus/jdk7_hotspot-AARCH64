@@ -146,8 +146,8 @@ class InterpreterMacroAssembler: public MacroAssembler {
   void pop(TosState state); // transition vtos -> state
   void push(TosState state); // transition state -> vtos
 
-  void pop(unsigned bitset, Register stack) { ((MacroAssembler*)this)->pop(bitset, stack); }
-  void push(unsigned bitset, Register stack) { ((MacroAssembler*)this)->push(bitset, stack); }
+  void pop(RegSet regs, Register stack) { ((MacroAssembler*)this)->pop(regs, stack); }
+  void push(RegSet regs, Register stack) { ((MacroAssembler*)this)->push(regs, stack); }
 
   void empty_expression_stack() {
     ldr(esp, Address(rfp, frame::interpreter_frame_monitor_block_top_offset * wordSize));
@@ -166,14 +166,14 @@ class InterpreterMacroAssembler: public MacroAssembler {
   // Dispatching
   void dispatch_prolog(TosState state, int step = 0);
   void dispatch_epilog(TosState state, int step = 0);
-  // dispatch via ebx (assume ebx is loaded already)
+  // dispatch via rscratch1
   void dispatch_only(TosState state);
-  // dispatch normal table via ebx (assume ebx is loaded already)
+  // dispatch normal table via rscratch1 (assume rscratch1 is loaded already)
   void dispatch_only_normal(TosState state);
   void dispatch_only_noverify(TosState state);
-  // load ebx from [esi + step] and dispatch via ebx
+  // load rscratch1 from [rbcp + step] and dispatch via rscratch1
   void dispatch_next(TosState state, int step = 0);
-  // load ebx from [esi] and dispatch via ebx and table
+  // load rscratch1 from [esi] and dispatch via rscratch1 and table
   void dispatch_via (TosState state, address* table);
 
   // jump to an invoked target
