@@ -93,43 +93,43 @@ void MacroAssembler::pd_patch_instruction(address branch, address target) {
       unsigned offset_lo = dest & 0xfff;
       offset = adr_page - pc_page;
 
+      // We handle 3 types of PC relative addressing
+      //   1 - adrp    Rx, target_page
+      //       ldr/str Ry, [Rx, #offset_in_page]
+      //   2 - adrp    Rx, target_page
+      //       add     Ry, Rx, #offset_in_page
+      //   3 - adrp    Rx, target_page (page aligned reloc, offset == 0)
+      // In the first 2 cases we must check that Rx is the same in the adrp and the
+      // subsequent ldr/str or add instruction. Otherwise we could accidentally end
+      // up treating a type 3 relocation as a type 1 or 2 just because it happened
+      // to be followed by a random unrelated ldr/str or add instruction.
+      //
+      // In the case of a type 3 relocation, we know that these are only generated
+      // for the safepoint polling page, or for the card type byte map base so we
+      // assert as much and of course that the offset is 0.
+      //
       unsigned insn2 = ((unsigned*)branch)[1];
-      if (Instruction_aarch64::extract(insn2, 29, 24) == 0b111001) {
+      if (Instruction_aarch64::extract(insn2, 29, 24) == 0b111001 &&
+		Instruction_aarch64::extract(insn, 4, 0) ==
+			Instruction_aarch64::extract(insn2, 9, 5)) {
 	// Load/store register (unsigned immediate)
 	unsigned size = Instruction_aarch64::extract(insn2, 31, 30);
 	Instruction_aarch64::patch(branch + sizeof (unsigned),
 				    21, 10, offset_lo >> size);
 	guarantee(((dest >> size) << size) == dest, "misaligned target");
-	guarantee(Instruction_aarch64::extract(insn, 4, 0)
-		  == Instruction_aarch64::extract(insn2, 9, 5),
-		  "Registers should be the same");
-      } else if (Instruction_aarch64::extract(insn2, 31, 22) == 0b1001000100) {
+      } else if (Instruction_aarch64::extract(insn2, 31, 22) == 0b1001000100 &&
+		Instruction_aarch64::extract(insn, 4, 0) ==
+			Instruction_aarch64::extract(insn2, 4, 0)) {
 	// add (immediate)
 	Instruction_aarch64::patch(branch + sizeof (unsigned),
 				   21, 10, offset_lo);
-	guarantee(Instruction_aarch64::extract(insn, 4, 0)
-		  == Instruction_aarch64::extract(insn2, 4, 0),
-		  "Registers should be the same");
-      } else if (Instruction_aarch64::extract(insn2, 31, 21) == 0b10001011000
-		 && Instruction_aarch64::extract(insn2, 15, 10) == 0) {
-	// Handle the cardtable relocation in g1_post_barrier
-	//	__ adrp(Rx, cardtable, offset);
-	//	__ add(Ry, Ry, Rx);
-	//	__ ldrb(Rz, Address(Ry, offset));
-        unsigned insn3 = ((unsigned*)branch)[2];
-	unsigned size = Instruction_aarch64::extract(insn3, 31, 30);
-	// The offset must not change becase it is used later in the
-	// g1_post_barrier code. So we don't patch anything here.
-	guarantee(Instruction_aarch64::extract(insn3, 21, 10) == (offset_lo >> size), "offset changed");
-	guarantee(Instruction_aarch64::extract(insn3, 29, 24) == 0b111001, "must be ldr imm");
-	guarantee(Instruction_aarch64::extract(insn, 4, 0)
-		  == Instruction_aarch64::extract(insn2, 20, 16), "Registers must match");
-	guarantee(Instruction_aarch64::extract(insn2, 4, 0)
-		  == Instruction_aarch64::extract(insn2, 9, 5), "Registers must match");
-	guarantee(Instruction_aarch64::extract(insn2, 4, 0)
-		  == Instruction_aarch64::extract(insn3, 9, 5), "Registers must match");
       } else {
-	ShouldNotReachHere();
+	assert((jbyte *)target ==
+		((CardTableModRefBS*)(Universe::heap()->barrier_set()))->byte_map_base ||
+               target == StubRoutines::crc_table_addr() ||
+               (address)target == os::get_polling_page(),
+	       "adrp must be polling page or byte map base");
+	assert(offset_lo == 0, "offset must be 0 for polling page or byte map base");
       }
     }
     int offset_lo = offset & 3;
@@ -179,14 +179,38 @@ address MacroAssembler::target_addr_for_insn(address insn_addr, unsigned insn) {
       offset <<= shift;
       uint64_t target_page = ((uint64_t)insn_addr) + offset;
       target_page &= ((uint64_t)-1) << shift;
+      // Return the target address for the following sequences
+      //   1 - adrp    Rx, target_page
+      //       ldr/str Ry, [Rx, #offset_in_page]
+      //   [ 2 - adrp    Rx, target_page         ] Not handled
+      //   [    add     Ry, Rx, #offset_in_page  ]
+      //   3 - adrp    Rx, target_page (page aligned reloc, offset == 0)
+      //
+      // In the case of type 1 we check that the register is the same and
+      // return the target_page + the offset within the page.
+      //
+      // Otherwise we assume it is a page aligned relocation and return
+      // the target page only. The only cases this is generated is for
+      // the safepoint polling page or for the card table byte map base so
+      // we assert as much.
+      //
+      // Note: Strangely, we do not handle 'type 2' relocation (adrp followed
+      // by add) which is handled in pd_patch_instruction above.
+      //
       unsigned insn2 = ((unsigned*)insn_addr)[1];
-      if (Instruction_aarch64::extract(insn2, 29, 24) == 0b111001) {
+      if (Instruction_aarch64::extract(insn2, 29, 24) == 0b111001 &&
+		Instruction_aarch64::extract(insn, 4, 0) ==
+			Instruction_aarch64::extract(insn2, 9, 5)) {
 	// Load/store register (unsigned immediate)
 	unsigned int byte_offset = Instruction_aarch64::extract(insn2, 21, 10);
 	unsigned int size = Instruction_aarch64::extract(insn2, 31, 30);
 	return address(target_page + (byte_offset << size));
       } else {
-	ShouldNotReachHere();
+	assert((jbyte *)target_page ==
+		((CardTableModRefBS*)(Universe::heap()->barrier_set()))->byte_map_base ||
+               (address)target_page == os::get_polling_page(),
+	       "adrp must be polling page or byte map base");
+	return (address)target_page;
       }
     } else {
       ShouldNotReachHere();
@@ -414,7 +438,7 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
     Label here;
     load_prototype_header(tmp_reg, obj_reg);
     orr(tmp_reg, rthread, tmp_reg);
-    cmpxchgptr(tmp_reg, swap_reg, obj_reg, rscratch1, here, slow_case);
+    cmpxchgptr(swap_reg, tmp_reg, obj_reg, rscratch1, here, slow_case);
     // If the biasing toward our thread failed, then another thread
     // succeeded in biasing it toward itself and we need to revoke that
     // bias. The revocation will occur in the runtime in the slow case.
@@ -441,7 +465,7 @@ int MacroAssembler::biased_locking_enter(Register lock_reg,
   {
     Label here, nope;
     load_prototype_header(tmp_reg, obj_reg);
-    cmpxchgptr(tmp_reg, swap_reg, obj_reg, rscratch1, here, &nope);
+    cmpxchgptr(swap_reg, tmp_reg, obj_reg, rscratch1, here, &nope);
     bind(here);
 
     // Fall through to the normal CAS-based lock, because no matter what
@@ -985,14 +1009,15 @@ void MacroAssembler::check_klass_subtype_slow_path(Register sub_klass,
   assert(sub_klass != r2, "killed reg"); // killed by lea(r2, &pst_counter)
 
   // Get super_klass value into r0 (even if it was in r5 or r2).
-  bool pushed_r0 = false, pushed_r2 = !IS_A_TEMP(r2), pushed_r5 = !IS_A_TEMP(r5);
+  RegSet pushed_registers;
+  if (!IS_A_TEMP(r2))    pushed_registers += r2;
+  if (!IS_A_TEMP(r5))    pushed_registers += r5;
 
   if (super_klass != r0 || UseCompressedOops) {
-    if (!IS_A_TEMP(r0))
-      pushed_r0 = true;
+    if (!IS_A_TEMP(r0))   pushed_registers += r0;
   }
 
-  push(r0->bit(pushed_r0) | r2->bit(pushed_r2) | r5->bit(pushed_r5), sp);
+  push(pushed_registers, sp);
 
 #ifndef PRODUCT
   mov(rscratch2, (address)&SharedRuntime::_partial_subtype_ctr);
@@ -1015,7 +1040,7 @@ void MacroAssembler::check_klass_subtype_slow_path(Register sub_klass,
   repne_scan(r5, r0, r2, rscratch1);
 
   // Unspill the temp. registers:
-  pop(r0->bit(pushed_r0) | r2->bit(pushed_r2) | r5->bit(pushed_r5), sp);
+  pop(pushed_registers, sp);
 
   br(Assembler::NE, *L_failure);
 
@@ -1437,40 +1462,22 @@ void MacroAssembler::atomic_incw(Register counter_addr, Register tmp) {
 int MacroAssembler::corrected_idivl(Register result, Register ra, Register rb,
 				    bool want_remainder, Register scratch)
 {
-  // Full implementation of Java idiv and irem; checks for special
-  // case as described in JVM spec., p.243 & p.271.  The function
-  // returns the (pc) offset of the idivl instruction - may be needed
+  // Full implementation of Java idiv and irem.  The function
+  // returns the (pc) offset of the div instruction - may be needed
   // for implicit exceptions.
   //
   // constraint : ra/rb =/= scratch
-  //         normal case                          special case
+  //         normal case
   //
-  // input : ra: dividend                         min_long
-  //         rb: divisor                          -1
+  // input : ra: dividend
+  //         rb: divisor
   //
   // result: either
-  //         quotient  (= ra idiv rb)         min_long
-  //         remainder (= ra irem rb)         0
+  //         quotient  (= ra idiv rb)
+  //         remainder (= ra irem rb)
 
   assert(ra != scratch && rb != scratch, "reg cannot be scratch");
-  static const int64_t min_long = 0x80000000;
-  Label normal_case, special_case;
 
-  // check for special cases
-  movw(scratch, min_long);
-  cmpw(ra, scratch);
-  br(Assembler::NE, normal_case);
-  // check for -1 in rb
-  cmnw(rb, 1);
-  br(Assembler::NE, normal_case);
-  if (! want_remainder)
-    mov(result, ra);
-  else
-    mov(result, zr);
-  b(special_case);
-
-  // handle normal case
-  bind(normal_case);
   int idivl_offset = offset();
   if (! want_remainder) {
     sdivw(result, ra, rb);
@@ -1479,49 +1486,28 @@ int MacroAssembler::corrected_idivl(Register result, Register ra, Register rb,
     msubw(result, scratch, rb, ra);
   }
 
-  // normal and special case exit
-  bind(special_case);
-
   return idivl_offset;
 }
 
 int MacroAssembler::corrected_idivq(Register result, Register ra, Register rb,
 				    bool want_remainder, Register scratch)
 {
-  // Full implementation of Java idiv and irem; checks for special
-  // case as described in JVM spec., p.243 & p.271.  The function
-  // returns the (pc) offset of the idivq instruction - may be needed
+  // Full implementation of Java ldiv and lrem.  The function
+  // returns the (pc) offset of the div instruction - may be needed
   // for implicit exceptions.
   //
   // constraint : ra/rb =/= scratch
-  //         normal case                          special case
+  //         normal case
   //
-  // input : ra: dividend                         min_long
-  //         rb: divisor                          -1
+  // input : ra: dividend
+  //         rb: divisor
   //
   // result: either
-  //         quotient  (= ra idiv rb)         min_long
-  //         remainder (= ra irem rb)         0
+  //         quotient  (= ra idiv rb)
+  //         remainder (= ra irem rb)
 
   assert(ra != scratch && rb != scratch, "reg cannot be scratch");
-  static const int64_t min_long = 0x8000000000000000ULL;
-  Label normal_case, special_case, nonzero;
 
-  // check for special cases
-  mov(scratch, min_long);
-  cmp(ra, scratch);
-  br(Assembler::NE, normal_case);
-  // check for -1 in rb
-  cmn(rb, 1);
-  br(Assembler::NE, normal_case);
-  if (! want_remainder)
-    mov(result, ra);
-  else
-    mov(result, zr);
-  b(special_case);
-
-  // handle normal case
-  bind(normal_case);
   int idivq_offset = offset();
   if (! want_remainder) {
     sdiv(result, ra, rb);
@@ -1529,9 +1515,6 @@ int MacroAssembler::corrected_idivq(Register result, Register ra, Register rb,
     sdiv(scratch, ra, rb);
     msub(result, scratch, rb, ra);
   }
-
-  // normal and special case exit
-  bind(special_case);
 
   return idivq_offset;
 }
@@ -1695,15 +1678,13 @@ void MacroAssembler::popa() {
 }
 
 // Push lots of registers in the bit set supplied.  Don't push sp.
-// Return the number of registers pushed
+// Return the number of words pushed
 int MacroAssembler::push(unsigned int bitset, Register stack) {
-  // need to push all registers including original sp
-
   int words_pushed = 0;
 
   // Scan bitset to accumulate register pairs
   unsigned char regs[32];
-  unsigned count = 0;
+  int count = 0;
   for (int reg = 0; reg <= 30; reg++) {
     if (1 & bitset)
       regs[count++] = reg;
@@ -1712,13 +1693,20 @@ int MacroAssembler::push(unsigned int bitset, Register stack) {
   regs[count++] = zr->encoding_nocheck();
   count &= ~1;  // Only push an even nuber of regs
 
-  for (int i = count - 2; i >= 0; i-= 2) {
+  if (count) {
+    stp(as_Register(regs[0]), as_Register(regs[1]),
+       Address(pre(stack, -count * wordSize)));
+    words_pushed += 2;
+  }
+  for (int i = 2; i < count; i += 2) {
     stp(as_Register(regs[i]), as_Register(regs[i+1]),
-	Address(pre(stack, -2 * wordSize)));
+       Address(stack, i * wordSize));
     words_pushed += 2;
   }
 
-  return words_pushed;
+  assert(words_pushed == count, "oops, pushed != count");
+
+  return count;
 }
 
 int MacroAssembler::pop(unsigned int bitset, Register stack) {
@@ -1726,7 +1714,7 @@ int MacroAssembler::pop(unsigned int bitset, Register stack) {
 
   // Scan bitset to accumulate register pairs
   unsigned char regs[32];
-  unsigned count = 0;
+  int count = 0;
   for (int reg = 0; reg <= 30; reg++) {
     if (1 & bitset)
       regs[count++] = reg;
@@ -1735,16 +1723,22 @@ int MacroAssembler::pop(unsigned int bitset, Register stack) {
   regs[count++] = zr->encoding_nocheck();
   count &= ~1;
 
-  for (unsigned i = 0; i < count; i+= 2) {
+  for (int i = 2; i < count; i += 2) {
     ldp(as_Register(regs[i]), as_Register(regs[i+1]),
-	Address(post(stack, 2 * wordSize)));
+       Address(stack, i * wordSize));
+    words_pushed += 2;
+  }
+  if (count) {
+    ldp(as_Register(regs[0]), as_Register(regs[1]),
+       Address(post(stack, count * wordSize)));
     words_pushed += 2;
   }
 
-  return words_pushed;
-}
+  assert(words_pushed == count, "oops, pushed != count");
 
-#ifdef ASSERT 
+  return count;
+}
+#ifdef ASSERT
 void MacroAssembler::verify_heapbase(const char* msg) {
 #if 0
   assert (UseCompressedOops || UseCompressedClassPointers, "should be compressed");
@@ -1820,9 +1814,9 @@ void MacroAssembler::add(Register Rd, Register Rn, RegisterOrConstant increment)
 
 void MacroAssembler::addw(Register Rd, Register Rn, RegisterOrConstant increment) {
   if (increment.is_register()) {
-    add(Rd, Rn, increment.as_register());
+    addw(Rd, Rn, increment.as_register());
   } else {
-    add(Rd, Rn, increment.as_constant());
+    addw(Rd, Rn, increment.as_constant());
   }
 }
 
@@ -1859,13 +1853,11 @@ void MacroAssembler::cmpxchgptr(Register oldv, Register newv, Register addr, Reg
   bind(retry_load);
   // flush and load exclusive from the memory location
   // and fail if it is not what we expect
-  membar(AnyAny);
-  ldxr(tmp, addr);
+  ldaxr(tmp, addr);
   cmp(tmp, oldv);
   br(Assembler::NE, nope);
   // if we store+flush with no intervening write tmp wil be zero
-  stxr(tmp, newv, addr);
-  membar(AnyAny);
+  stlxr(tmp, newv, addr);
   cbzw(tmp, succeed);
   // retry so we only ever return after a load fails to compare
   // ensures we don't return a stale value after a failed write.
@@ -1889,13 +1881,11 @@ void MacroAssembler::cmpxchgw(Register oldv, Register newv, Register addr, Regis
   bind(retry_load);
   // flush and load exclusive from the memory location
   // and fail if it is not what we expect
-  membar(AnyAny);
-  ldxrw(tmp, addr);
+  ldaxrw(tmp, addr);
   cmp(tmp, oldv);
   br(Assembler::NE, nope);
   // if we store+flush with no intervening write tmp wil be zero
-  stxrw(tmp, newv, addr);
-  membar(AnyAny);
+  stlxrw(tmp, newv, addr);
   cbzw(tmp, succeed);
   // retry so we only ever return after a load fails to compare
   // ensures we don't return a stale value after a failed write.
@@ -1907,6 +1897,54 @@ void MacroAssembler::cmpxchgw(Register oldv, Register newv, Register addr, Regis
   if (fail)
     b(*fail);
 }
+
+static bool different(Register a, RegisterOrConstant b, Register c) {
+  if (b.is_constant())
+    return a != c;
+  else
+    return a != b.as_register() && a != c && b.as_register() != c;
+}
+
+#define ATOMIC_OP(LDXR, OP, STXR)					\
+void MacroAssembler::atomic_##OP(Register prev, RegisterOrConstant incr, Register addr) { \
+  Register result = rscratch2;						\
+  if (prev->is_valid())							\
+    result = different(prev, incr, addr) ? prev : rscratch2;		\
+									\
+  Label retry_load;							\
+  bind(retry_load);							\
+  LDXR(result, addr);							\
+  OP(rscratch1, result, incr);						\
+  STXR(rscratch1, rscratch1, addr);					\
+  cbnzw(rscratch1, retry_load);						\
+  if (prev->is_valid() && prev != result)				\
+    mov(prev, result);							\
+}
+
+ATOMIC_OP(ldxr, add, stxr)
+ATOMIC_OP(ldxrw, addw, stxrw)
+
+#undef ATOMIC_OP
+
+#define ATOMIC_XCHG(OP, LDXR, STXR)					\
+void MacroAssembler::atomic_##OP(Register prev, Register newv, Register addr) {	\
+  Register result = rscratch2;						\
+  if (prev->is_valid())							\
+    result = different(prev, newv, addr) ? prev : rscratch2;		\
+									\
+  Label retry_load;							\
+  bind(retry_load);							\
+  LDXR(result, addr);							\
+  STXR(rscratch1, newv, addr);						\
+  cbnzw(rscratch1, retry_load);						\
+  if (prev->is_valid() && prev != result)				\
+    mov(prev, result);							\
+}
+
+ATOMIC_XCHG(xchg, ldxr, stxr)
+ATOMIC_XCHG(xchgw, ldxrw, stxrw)
+
+#undef ATOMIC_XCHG
 
 void MacroAssembler::incr_allocated_bytes(Register thread,
                                           Register var_size_in_bytes,
@@ -1943,9 +1981,6 @@ void MacroAssembler::debug64(char* msg, int64_t pc, int64_t regs[])
       BytecodeCounter::print();
     }
 #endif
-    // To see where a verify_oop failed, get $ebx+40/X for this frame.
-    // XXX correct this offset for amd64
-    // This is the value of eip which points to where verify_oop will return.
     if (os::message_box(msg, "Execution stopped, print registers?")) {
       ttyLocker ttyl;
       tty->print_cr(" pc = 0x%016lx", pc);
@@ -2056,6 +2091,114 @@ void MacroAssembler::pop_CPU_state() {
   pop(0x3fffffff, sp);         // integer registers except lr & sp
 }
 
+/**
+ * Emits code to update CRC-32 with a byte value according to constants in table
+ *
+ * @param [in,out]crc   Register containing the crc.
+ * @param [in]val       Register containing the byte to fold into the CRC.
+ * @param [in]table     Register containing the table of crc constants.
+ *
+ * uint32_t crc;
+ * val = crc_table[(val ^ crc) & 0xFF];
+ * crc = val ^ (crc >> 8);
+ *
+ */
+void MacroAssembler::update_byte_crc32(Register crc, Register val, Register table) {
+  eor(val, val, crc);
+  andr(val, val, 0xff);
+  ldrw(val, Address(table, val, Address::lsl(2)));
+  eor(crc, val, crc, Assembler::LSR, 8);
+}
+
+/**
+ * Emits code to update CRC-32 with a 32-bit value according to tables 0 to 3
+ *
+ * @param [in,out]crc   Register containing the crc.
+ * @param [in]v         Register containing the 32-bit to fold into the CRC.
+ * @param [in]table0    Register containing table 0 of crc constants.
+ * @param [in]table1    Register containing table 1 of crc constants.
+ * @param [in]table2    Register containing table 2 of crc constants.
+ * @param [in]table3    Register containing table 3 of crc constants.
+ *
+ * uint32_t crc;
+ *   v = crc ^ v
+ *   crc = table3[v&0xff]^table2[(v>>8)&0xff]^table1[(v>>16)&0xff]^table0[v>>24]
+ *
+ */
+void MacroAssembler::update_word_crc32(Register crc, Register v, Register tmp,
+        Register table0, Register table1, Register table2, Register table3,
+        bool upper) {
+  eor(v, crc, v, upper ? LSR:LSL, upper ? 32:0);
+  uxtb(tmp, v);
+  ldrw(crc, Address(table3, tmp, Address::lsl(2)));
+  ubfx(tmp, v, 8, 8);
+  ldrw(tmp, Address(table2, tmp, Address::lsl(2)));
+  eor(crc, crc, tmp);
+  ubfx(tmp, v, 16, 8);
+  ldrw(tmp, Address(table1, tmp, Address::lsl(2)));
+  eor(crc, crc, tmp);
+  ubfx(tmp, v, 24, 8);
+  ldrw(tmp, Address(table0, tmp, Address::lsl(2)));
+  eor(crc, crc, tmp);
+}
+
+/**
+ * @param crc   register containing existing CRC (32-bit)
+ * @param buf   register pointing to input byte buffer (byte*)
+ * @param len   register containing number of bytes
+ * @param table register that will contain address of CRC table
+ * @param tmp   scratch register
+ */
+void MacroAssembler::kernel_crc32(Register crc, Register buf, Register len,
+        Register table0, Register table1, Register table2, Register table3,
+        Register tmp, Register tmp2, Register tmp3) {
+  Label L_by16_loop, L_by4, L_by4_loop, L_by1, L_by1_loop, L_exit;
+  unsigned long offset;
+    ornw(crc, zr, crc);
+    adrp(table0, ExternalAddress(StubRoutines::crc_table_addr()), offset);
+    if (offset) add(table0, table0, offset);
+    add(table1, table0, 1*256*sizeof(juint));
+    add(table2, table0, 2*256*sizeof(juint));
+    add(table3, table0, 3*256*sizeof(juint));
+    subs(len, len, 16);
+    br(Assembler::GE, L_by16_loop);
+    adds(len, len, 16-4);
+    br(Assembler::GE, L_by4_loop);
+    adds(len, len, 4);
+    br(Assembler::GT, L_by1_loop);
+    b(L_exit);
+
+  BIND(L_by4_loop);
+    ldrw(tmp, Address(post(buf, 4)));
+    update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3);
+    subs(len, len, 4);
+    br(Assembler::GE, L_by4_loop);
+    adds(len, len, 4);
+    br(Assembler::LE, L_exit);
+  BIND(L_by1_loop);
+    subs(len, len, 1);
+    ldrb(tmp, Address(post(buf, 1)));
+    update_byte_crc32(crc, tmp, table0);
+    br(Assembler::GT, L_by1_loop);
+    b(L_exit);
+
+    align(CodeEntryAlignment);
+  BIND(L_by16_loop);
+    subs(len, len, 16);
+    ldp(tmp, tmp3, Address(post(buf, 16)));
+    update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, false);
+    update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, true);
+    update_word_crc32(crc, tmp3, tmp2, table0, table1, table2, table3, false);
+    update_word_crc32(crc, tmp3, tmp2, table0, table1, table2, table3, true);
+    br(Assembler::GE, L_by16_loop);
+    adds(len, len, 16-4);
+    br(Assembler::GE, L_by4_loop);
+    adds(len, len, 4);
+    br(Assembler::GT, L_by1_loop);
+  BIND(L_exit);
+    ornw(crc, zr, crc);
+}
+
 SkipIfEqual::SkipIfEqual(
     MacroAssembler* masm, const bool* flag_addr, bool value) {
   _masm = masm;
@@ -2120,6 +2263,20 @@ void MacroAssembler::load_klass(Register dst, Register src) {
   } else {
     ldr(dst, Address(src, oopDesc::klass_offset_in_bytes()));
   }
+}
+
+void MacroAssembler::cmp_klass(Register oop, Register trial_klass, Register tmp) {
+  if (UseCompressedClassPointers) {
+    ldrw(tmp, Address(oop, oopDesc::klass_offset_in_bytes()));
+    if (Universe::narrow_klass_base() == NULL) {
+      cmp(trial_klass, tmp, LSL, Universe::narrow_klass_shift());
+      return;
+    }
+    decode_klass_not_null(tmp);
+  } else {
+    ldr(tmp, Address(oop, oopDesc::klass_offset_in_bytes()));
+  }
+  cmp(trial_klass, tmp);
 }
 
 void MacroAssembler::load_prototype_header(Register dst, Register src) {
@@ -2933,23 +3090,6 @@ void MacroAssembler::adrp(Register reg1, const Address &dest, unsigned long &byt
     byte_offset = (uint64_t)dest.target() & 0xfff;
     _adrp(reg1, dest.target());
   }
-}
-
-void MacroAssembler::generate_flush_loop(flush_insn flush, Register start, Register lines) {
-  Label again, exit;
-
-  assert_different_registers(start, lines, rscratch1, rscratch2);
-
-  cmp(lines, zr);
-  br(Assembler::LE, exit);
-  mov(rscratch1, start);
-  mov(rscratch2, lines);
-  bind(again);
-  (this->*flush)(rscratch1);
-  sub(rscratch2, rscratch2, 1);
-  add(rscratch1, rscratch1, ICache::line_size);
-  cbnz(rscratch2, again);
-  bind(exit);
 }
 
   bool MacroAssembler::use_acq_rel_for_volatile_fields() {

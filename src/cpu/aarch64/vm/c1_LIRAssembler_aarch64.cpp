@@ -378,7 +378,7 @@ int LIR_Assembler::emit_exception_handler() {
 
   int offset = code_offset();
 
-  // the exception oop and pc are in rax, and rdx
+  // the exception oop and pc are in r0, and r3
   // no other registers need to be preserved, so invalidate them
   __ invalidate_registers(false, true, true, false, true, true);
 
@@ -1378,12 +1378,14 @@ void LIR_Assembler::emit_typecheck_helper(LIR_OpTypeCheck *op, Label* success, L
       // Object is null; update MDO and exit
       Register mdo  = klass_RInfo;
       __ mov_metadata(mdo, md->constant_encoding());
-      Address data_addr(mdo, md->byte_offset_of_slot(data, DataLayout::header_offset()));
+      Address data_addr
+	= __ form_address(rscratch2, mdo,
+			  md->byte_offset_of_slot(data, DataLayout::DataLayout::header_offset()),
+			  LogBytesPerWord);
       int header_bits = DataLayout::flag_mask_to_header_mask(BitData::null_seen_byte_constant());
-      __ lea(rscratch2, data_addr);
-      __ ldrw(rscratch1, Address(rscratch2));
-      __ orrw(rscratch1, rscratch1, header_bits);
-      __ strw(rscratch1, Address(rscratch2));
+      __ ldr(rscratch1, data_addr);
+      __ orr(rscratch1, rscratch1, header_bits);
+      __ str(rscratch1, data_addr);
       __ b(*obj_is_null);
       __ bind(not_null);
     } else {
@@ -1455,7 +1457,10 @@ void LIR_Assembler::emit_typecheck_helper(LIR_OpTypeCheck *op, Label* success, L
 
     __ bind(profile_cast_failure);
     __ mov_metadata(mdo, md->constant_encoding());
-    Address counter_addr(mdo, md->byte_offset_of_slot(data, CounterData::count_offset()));
+    Address counter_addr
+      = __ form_address(rscratch2, mdo,
+			md->byte_offset_of_slot(data, CounterData::count_offset()),
+			LogBytesPerWord);
     __ ldr(rscratch1, counter_addr);
     __ sub(rscratch1, rscratch1, DataLayout::counter_increment);
     __ str(rscratch1, counter_addr);
@@ -1579,14 +1584,13 @@ void LIR_Assembler::casw(Register addr, Register newval, Register cmpval) {
   Label retry_load, nope;
   // flush and load exclusive from the memory location
   // and fail if it is not what we expect
-  __ membar(__ AnyAny);
   __ bind(retry_load);
-  __ ldxrw(rscratch1, addr);
+  __ ldaxrw(rscratch1, addr);
   __ cmpw(rscratch1, cmpval);
   __ cset(rscratch1, Assembler::NE);
   __ br(Assembler::NE, nope);
   // if we store+flush with no intervening write rscratch1 wil be zero
-  __ stxrw(rscratch1, newval, addr);
+  __ stlxrw(rscratch1, newval, addr);
   // retry so we only ever return after a load fails to compare
   // ensures we don't return a stale value after a failed write.
   __ cbnzw(rscratch1, retry_load);
@@ -1598,14 +1602,13 @@ void LIR_Assembler::casl(Register addr, Register newval, Register cmpval) {
   Label retry_load, nope;
   // flush and load exclusive from the memory location
   // and fail if it is not what we expect
-  __ membar(__ AnyAny);
   __ bind(retry_load);
-  __ ldxr(rscratch1, addr);
+  __ ldaxr(rscratch1, addr);
   __ cmp(rscratch1, cmpval);
   __ cset(rscratch1, Assembler::NE);
   __ br(Assembler::NE, nope);
   // if we store+flush with no intervening write rscratch1 wil be zero
-  __ stxr(rscratch1, newval, addr);
+  __ stlxr(rscratch1, newval, addr);
   // retry so we only ever return after a load fails to compare
   // ensures we don't return a stale value after a failed write.
   __ cbnz(rscratch1, retry_load);
@@ -2070,7 +2073,7 @@ void LIR_Assembler::throw_op(LIR_Opr exceptionPC, LIR_Opr exceptionOop, CodeEmit
   add_call_info(pc_for_athrow_offset, info); // for exception handler
 
   __ verify_not_null_oop(r0);
-  // search an exception handler (rax: exception oop, rdx: throwing pc)
+  // search an exception handler (r0: exception oop, r3: throwing pc)
   if (compilation()->has_fpu_code()) {
     unwind_id = Runtime1::handle_exception_id;
   } else {
@@ -2613,7 +2616,7 @@ void LIR_Assembler::emit_profile_call(LIR_OpProfileCall* op) {
 	  __ lea(rscratch2, recv_addr);
           __ str(rscratch1, Address(rscratch2));
           Address data_addr(mdo, md->byte_offset_of_slot(data, VirtualCallData::receiver_count_offset(i)));
-	  __ addptr(counter_addr, DataLayout::counter_increment);
+	  __ addptr(data_addr, DataLayout::counter_increment);
           return;
         }
       }
@@ -2644,7 +2647,21 @@ void LIR_Assembler::monitor_address(int monitor_no, LIR_Opr dst) {
 }
 
 void LIR_Assembler::emit_updatecrc32(LIR_OpUpdateCRC32* op) {
-  fatal("CRC32 intrinsic is not implemented on this platform");
+  assert(op->crc()->is_single_cpu(),  "crc must be register");
+  assert(op->val()->is_single_cpu(),  "byte value must be register");
+  assert(op->result_opr()->is_single_cpu(), "result must be register");
+  Register crc = op->crc()->as_register();
+  Register val = op->val()->as_register();
+  Register res = op->result_opr()->as_register();
+
+  assert_different_registers(val, crc, res);
+  unsigned long offset;
+  __ adrp(res, ExternalAddress(StubRoutines::crc_table_addr()), offset);
+  if (offset) __ add(res, res, offset);
+
+  __ ornw(crc, zr, crc); // ~crc
+  __ update_byte_crc32(crc, val, res);
+  __ ornw(res, zr, crc); // ~crc
 }
 
 void LIR_Assembler::emit_profile_type(LIR_OpProfileType* op) {
@@ -3084,23 +3101,23 @@ void LIR_Assembler::atomic_op(LIR_Code code, LIR_Opr src, LIR_Opr data, LIR_Opr 
   case T_INT:
     lda = &MacroAssembler::ldaxrw;
     add = &MacroAssembler::addw;
-    stl = &MacroAssembler::stxrw;
+    stl = &MacroAssembler::stlxrw;
     break;
   case T_LONG:
     lda = &MacroAssembler::ldaxr;
     add = &MacroAssembler::add;
-    stl = &MacroAssembler::stxr;
+    stl = &MacroAssembler::stlxr;
     break;
   case T_OBJECT:
   case T_ARRAY:
     if (UseCompressedOops) {
       lda = &MacroAssembler::ldaxrw;
       add = &MacroAssembler::addw;
-      stl = &MacroAssembler::stxrw;
+      stl = &MacroAssembler::stlxrw;
     } else {
       lda = &MacroAssembler::ldaxr;
       add = &MacroAssembler::add;
-      stl = &MacroAssembler::stxr;
+      stl = &MacroAssembler::stlxr;
     }
     break;
   default:

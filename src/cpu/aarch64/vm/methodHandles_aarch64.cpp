@@ -77,7 +77,7 @@ void MethodHandles::verify_klass(MacroAssembler* _masm,
   BLOCK_COMMENT("verify_klass {");
   __ verify_oop(obj);
   __ cbz(obj, L_bad);
-  __ push(temp->bit() | temp2->bit(), sp);
+  __ push(RegSet::of(temp, temp2), sp);
   __ load_klass(temp, obj);
   __ cmpptr(temp, ExternalAddress((address) klass_addr));
   __ br(Assembler::EQ, L_ok);
@@ -85,11 +85,11 @@ void MethodHandles::verify_klass(MacroAssembler* _masm,
   __ ldr(temp, Address(temp, super_check_offset));
   __ cmpptr(temp, ExternalAddress((address) klass_addr));
   __ br(Assembler::EQ, L_ok);
-  __ pop(temp->bit() | temp2->bit(), sp);
+  __ pop(RegSet::of(temp, temp2), sp);
   __ bind(L_bad);
   __ stop(error_message);
   __ BIND(L_ok);
-  __ pop(temp->bit() | temp2->bit(), sp);
+  __ pop(RegSet::of(temp, temp2), sp);
   BLOCK_COMMENT("} verify_klass");
 }
 
@@ -262,7 +262,7 @@ void MethodHandles::generate_method_handle_dispatch(MacroAssembler* _masm,
   // temps used in this code are not used in *either* compiled or interpreted calling sequences
   Register temp1 = r10;
   Register temp2 = r11;
-  Register temp3 = r14;  // r13 is live ty this point: it contains the sender SP
+  Register temp3 = r14;  // r13 is live by this point: it contains the sender SP
   if (for_compiler_entry) {
     assert(receiver_reg == (iid == vmIntrinsics::_linkToStatic ? noreg : j_rarg0), "only valid assignment");
     assert_different_registers(temp1,        j_rarg0, j_rarg1, j_rarg2, j_rarg3, j_rarg4, j_rarg5, j_rarg6, j_rarg7);
@@ -331,7 +331,7 @@ void MethodHandles::generate_method_handle_dispatch(MacroAssembler* _masm,
     // Live registers at this point:
     //  member_reg - MemberName that was the trailing argument
     //  temp1_recv_klass - klass of stacked receiver, if needed
-    //  rsi/r13 - interpreter linkage (if interpreted)  ??? FIXME
+    //  r13 - interpreter linkage (if interpreted)  ??? FIXME
     //  r1 ... r0 - compiler arguments (if compiled)
 
     Label L_incompatible_class_change_error;
@@ -416,7 +416,7 @@ void MethodHandles::generate_method_handle_dispatch(MacroAssembler* _masm,
       break;
     }
 
-    // live at this point:  rmethod, rsi/r13 (if interpreted)
+    // live at this point:  rmethod, r13 (if interpreted)
 
     // After figuring out which concrete method to call, jump into it.
     // Note that this works in the interpreter with no data motion.
