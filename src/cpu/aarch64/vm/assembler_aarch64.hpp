@@ -1992,6 +1992,11 @@ public:
   void emit_data64(jlong data, RelocationHolder const& rspec, int format = 0);
 };
 
+inline Assembler::Membar_mask_bits operator|(Assembler::Membar_mask_bits a,
+					     Assembler::Membar_mask_bits b) {
+  return Assembler::Membar_mask_bits(unsigned(a)|unsigned(b));
+}
+
 Instruction_aarch64::~Instruction_aarch64() {
   assem->emit();
 }
