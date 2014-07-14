@@ -1924,7 +1924,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   if(os::is_MP()) {
     if (UseMembar) {
       // Force this write out before the read below
-      __ dsb(Assembler::SY);
+      __ dmb(Assembler::SY);
     } else {
       // Write serialization page so VM thread can do a pseudo remote membar.
       // We use the current thread pointer to calculate a thread specific
