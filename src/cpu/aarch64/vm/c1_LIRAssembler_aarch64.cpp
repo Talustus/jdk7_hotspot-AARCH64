@@ -515,7 +515,7 @@ void LIR_Assembler::poll_for_safepoint(relocInfo::relocType rtype, CodeEmitInfo*
   __ pop(0x3, sp);                 // r0 & r1
   __ leave();
   __ br(rscratch1);
-  address polling_page(os::get_polling_page() + (SafepointPollOffset % os::vm_page_size()));
+  address polling_page(os::get_polling_page());
   assert(os::is_poll_address(polling_page), "should be");
   unsigned long off;
   __ adrp(rscratch1, Address(polling_page, rtype), off);
@@ -534,7 +534,7 @@ void LIR_Assembler::return_op(LIR_Opr result) {
   // Pop the stack before the safepoint code
   __ remove_frame(initial_frame_size_in_bytes());
   if (UseCompilerSafepoints) {
-    address polling_page(os::get_polling_page() + (SafepointPollOffset % os::vm_page_size()));
+    address polling_page(os::get_polling_page());
     __ read_polling_page(rscratch1, polling_page, relocInfo::poll_return_type);
   } else {
     poll_for_safepoint(relocInfo::poll_return_type);
@@ -543,8 +543,7 @@ void LIR_Assembler::return_op(LIR_Opr result) {
 }
 
 int LIR_Assembler::safepoint_poll(LIR_Opr tmp, CodeEmitInfo* info) {
-  address polling_page(os::get_polling_page()
-		       + (SafepointPollOffset % os::vm_page_size()));
+  address polling_page(os::get_polling_page());
   if (UseCompilerSafepoints) {
     guarantee(info != NULL, "Shouldn't be NULL");
     assert(os::is_poll_address(polling_page), "should be");

@@ -2807,9 +2807,6 @@ encode %{
       __ call_Unimplemented();
     }
   %}
-  // TODO
-  // this only works ifdef BUILTIN_SIM
-  // provide version for native AArch64 build
 
   enc_class aarch64_enc_java_to_runtime(method meth) %{
     MacroAssembler _masm(&cbuf);

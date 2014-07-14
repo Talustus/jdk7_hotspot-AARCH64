@@ -3079,6 +3079,7 @@ address MacroAssembler::read_polling_page(Register r, relocInfo::relocType rtype
 }
 
 void MacroAssembler::adrp(Register reg1, const Address &dest, unsigned long &byte_offset) {
+  relocInfo::relocType rtype = dest.rspec().reloc()->type();
   if (labs(pc() - dest.target()) >= (1LL << 32)) {
     // Out of range.  This doesn't happen very often, but we have to
     // handle it
