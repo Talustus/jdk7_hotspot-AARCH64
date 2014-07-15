@@ -1842,8 +1842,12 @@ void MacroAssembler::addw(Register Rd, Register Rn, RegisterOrConstant increment
 void MacroAssembler::reinit_heapbase()
 {
   if (UseCompressedOops) {
-    lea(rheapbase, ExternalAddress((address)Universe::narrow_ptrs_base_addr()));
-    ldr(rheapbase, Address(rheapbase));
+    if (Universe::is_fully_initialized()) {
+      mov(rheapbase, Universe::narrow_ptrs_base());
+    } else {
+      lea(rheapbase, ExternalAddress((address)Universe::narrow_ptrs_base_addr()));
+      ldr(rheapbase, Address(rheapbase));
+    }
   }
 }
 
