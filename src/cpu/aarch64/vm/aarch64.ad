@@ -2058,7 +2058,7 @@ encode %{
     int call_offset = (nargs + 11) * 4;
     int field_offset = in_bytes(JavaThread::frame_anchor_offset()) +
                        in_bytes(JavaFrameAnchor::last_Java_pc_offset());
-    __ mov(rscratch1, InternalAddress(pc + call_offset));
+    __ lea(rscratch1, InternalAddress(pc + call_offset));
     __ str(rscratch1, Address(rthread, field_offset));
   %}
 
@@ -2487,9 +2487,9 @@ encode %{
     } else {
       relocInfo::relocType rtype = $src->constant_reloc();
       if (rtype == relocInfo::oop_type) {
-        __ movoop(dst_reg, (jobject)con);
+        __ movoop(dst_reg, (jobject)con, /*mt_safe*/false);
       } else if (rtype == relocInfo::metadata_type) {
-        __ mov_metadata(dst_reg, (Metadata*)con);
+        __ mov_metadata(dst_reg, (Metadata*)con, /*mt_safe*/false);
       } else {
         assert(rtype == relocInfo::none, "unexpected reloc type");
         __ lea(dst_reg, Address(con, rtype));
@@ -2536,7 +2536,7 @@ encode %{
     } else {
       relocInfo::relocType rtype = $src->constant_reloc();
       assert(rtype == relocInfo::oop_type, "unexpected reloc type");
-      __ set_narrow_oop(dst_reg, (jobject)con);
+      __ set_narrow_oop(dst_reg, (jobject)con, /*mt_safe*/false);
     }
   %}
 
@@ -2555,7 +2555,7 @@ encode %{
     } else {
       relocInfo::relocType rtype = $src->constant_reloc();
       assert(rtype == relocInfo::metadata_type, "unexpected reloc type");
-      __ set_narrow_klass(dst_reg, (Klass *)con);      
+      __ set_narrow_klass(dst_reg, (Klass *)con, /*mt_safe*/false);      
     }
   %}
 
@@ -2823,7 +2823,7 @@ encode %{
       int fpcnt;
       int rtype;
       getCallInfo(tf(), gpcnt, fpcnt, rtype);
-      __ mov(rscratch1, RuntimeAddress(entry));
+      __ lea(rscratch1, RuntimeAddress(entry));
       __ blrt(rscratch1, gpcnt, fpcnt, rtype);
     }
   %}

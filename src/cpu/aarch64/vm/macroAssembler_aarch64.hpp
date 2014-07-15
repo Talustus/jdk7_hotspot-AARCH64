@@ -410,6 +410,8 @@ private:
   int push(unsigned int bitset, Register stack);
   int pop(unsigned int bitset, Register stack);
 
+  void mov(Register dst, Address a);
+
 public:
   int push(RegSet regs, Register stack) { if (regs.bits()) push(regs.bits(), stack); }
   int pop(RegSet regs, Register stack) { if (regs.bits()) pop(regs.bits(), stack); }
@@ -442,7 +444,6 @@ public:
     mov(dst, (long)i);
   }
 
-  void mov(Register dst, Address a);
   void movptr(Register r, uintptr_t imm64);
 
   // macro instructions for accessing and updating floating point
@@ -496,6 +497,8 @@ public:
 #ifndef PRODUCT
   static void pd_print_patched_instruction(address branch);
 #endif
+
+  static void patch_oop(address insn_addr, address o);
 
   // The following 4 methods return the offset of the appropriate move instruction
 
@@ -738,7 +741,7 @@ public:
   void encode_heap_oop_not_null(Register dst, Register src);
   void decode_heap_oop_not_null(Register dst, Register src);
 
-  void set_narrow_oop(Register dst, jobject obj);
+  void set_narrow_oop(Register dst, jobject obj, bool mt_safe = true);
   // currently unimplemented
 #if 0
   void set_narrow_oop(Address dst, jobject obj);
@@ -751,7 +754,7 @@ public:
   void encode_klass_not_null(Register dst, Register src);
   void decode_klass_not_null(Register dst, Register src);
 
-  void set_narrow_klass(Register dst, Klass* k);
+  void set_narrow_klass(Register dst, Klass* k, bool mt_safe = true);
   // currently unimplemented
 #if 0
   void set_narrow_klass(Address dst, Klass* k);
@@ -1107,7 +1110,7 @@ public:
 
   // Data
 
-  void mov_metadata(Register dst, Metadata* obj);
+  void mov_metadata(Register dst, Metadata* obj, bool mt_safe = true);
   Address allocate_metadata_address(Metadata* obj);
   Address constant_oop_address(jobject obj);
   // unimplemented
@@ -1115,7 +1118,7 @@ public:
   void pushoop(jobject obj);
 #endif
 
-  void movoop(Register dst, jobject obj);
+  void movoop(Register dst, jobject obj, bool mt_safe = true);
 
   // sign extend as need a l to ptr sized element
   void movl2ptr(Register dst, Address src) { Unimplemented(); }
