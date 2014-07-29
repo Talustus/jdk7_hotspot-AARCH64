@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2009, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2014, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -19,33 +19,55 @@
  * Please contact Oracle, 500 Oracle Parkway, Redwood Shores, CA 94065 USA
  * or visit www.oracle.com if you need additional information or have any
  * questions.
- *
  */
 
-/**
+/*
  * @test
- * @bug 6859338
- * @summary Assertion failure in sharedRuntime.cpp
+ * @bug 8011646
+ * @summary SEGV in compiled code with loop predication
+ * @run main/othervm  -XX:-TieredCompilation -XX:CompileOnly=TestHashCode.m1,Object.hashCode TestHashCode
  *
- * @run main/othervm -XX:+IgnoreUnrecognizedVMOptions  -XX:-InlineObjectHash -Xbatch -XX:-ProfileInterpreter Test6859338
  */
 
-public class Test6859338 {
-    static Object[] o = new Object[] { new Object(), null };
-    public static void main(String[] args) {
-        int total = 0;
-        try {
-            // Exercise the implicit null check in the unverified entry point
-            for (int i = 0; i < 40000; i++) {
-                int limit = o.length;
-                if (i < 20000) limit = 1;
-                for (int j = 0; j < limit; j++) {
-                    total += o[j].hashCode();
-                }
-            }
+public class TestHashCode {
+    static class A {
+        int i;
+    }
 
+    static class B extends A {
+    }
+
+    static boolean crash = false;
+
+    static A m2() {
+        if (crash) {
+            return null;
+        }
+        return new A();
+    }
+
+    static int m1(A aa) {
+        int res = 0;
+        for (int i = 0; i < 10; i++) {
+            A a = m2();
+            int j = a.i;
+            if (aa instanceof B) {
+            }
+            res += a.hashCode();
+        }
+        return res;
+    }
+
+    public static void main(String[] args) {
+        A a = new A();
+        for (int i = 0; i < 20000; i++) {
+            m1(a);
+        }
+        crash = true;
+        try {
+          m1(a);
         } catch (NullPointerException e) {
-            // this is expected.  A true failure causes a crash
+            System.out.println("Test passed");
         }
     }
 }

@@ -21,33 +21,38 @@
  * questions.
  */
 
-/* @test TestVerifyDuringStartup.java
+/* @test TestHandleExceedingProcessSizeLimitIn32BitBuilds.java
  * @key gc
- * @bug 8010463
- * @summary Simple test run with -XX:+VerifyDuringStartup -XX:-UseTLAB to verify 8010463
+ * @bug 6761744
+ * @summary Test run with "-Xmx3072m -XX:MaxPermSize=1024m" to correctly handle VM error (if any)
  * @library /testlibrary
  */
 
 import com.oracle.java.testlibrary.OutputAnalyzer;
 import com.oracle.java.testlibrary.ProcessTools;
+import java.util.ArrayList;
+import java.util.Collections;
 
-public class TestVerifyDuringStartup {
+public class TestHandleExceedingProcessSizeLimitIn32BitBuilds {
   public static void main(String args[]) throws Exception {
-    String test_vm_opts = System.getProperty("test.vm.opts");
-    ProcessBuilder pb;
-      if (test_vm_opts == null || test_vm_opts.equals("")) {
-              pb = ProcessTools.createJavaProcessBuilder(
-                                            "-XX:-UseTLAB",
-                                            "-XX:+UnlockDiagnosticVMOptions",
-                                            "-XX:+VerifyDuringStartup", "-version");
-       } else {
-              pb = ProcessTools.createJavaProcessBuilder(System.getProperty("test.vm.opts"),
-                                            "-XX:-UseTLAB",
-                                            "-XX:+UnlockDiagnosticVMOptions",
-                                            "-XX:+VerifyDuringStartup", "-version");
-       }
+    ArrayList<String> vmOpts = new ArrayList<>();
+    String testVmOptsStr = System.getProperty("test.java.opts");
+    if (!testVmOptsStr.isEmpty()) {
+      String[] testVmOpts = testVmOptsStr.split(" ");
+      Collections.addAll(vmOpts, testVmOpts);
+    }
+    Collections.addAll(vmOpts, new String[] {"-Xmx3072m", "-XX:MaxPermSize=1024m", "-version"});
+
+    ProcessBuilder pb
+      = ProcessTools.createJavaProcessBuilder(vmOpts.toArray(new String[vmOpts.size()]));
     OutputAnalyzer output = new OutputAnalyzer(pb.start());
-    output.shouldContain("[Verifying");
-    output.shouldHaveExitValue(0);
+
+    String dataModel = System.getProperty("sun.arch.data.model");
+    if (dataModel.equals("32")) {
+      output.shouldContain("The size of the object heap + perm gen exceeds the maximum representable size");
+      if (output.getExitValue() == 0) {
+        throw new RuntimeException("Not expected to get exit value 0");
+      }
+    }
   }
 }
