@@ -1,5 +1,5 @@
 #
-# Copyright (c) 1995, 2013, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 1995, 2012, Oracle and/or its affiliates. All rights reserved.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -162,9 +162,7 @@ clean:
 # jtreg tests
 
 # Expect JT_HOME to be set for jtreg tests. (home for jtreg)
-ifndef JT_HOME
-  JT_HOME = $(SLASH_JAVA)/re/jtreg/4.0/promoted/latest/binaries/jtreg
-endif
+JT_HOME = $(SLASH_JAVA)/re/jtreg/4.0/promoted/latest/binaries/jtreg
 ifdef JPRT_JTREG_HOME
   JT_HOME = $(JPRT_JTREG_HOME)
 endif
@@ -191,9 +189,9 @@ jtreg_tests: prep $(JT_HOME) $(PRODUCT_HOME) $(JTREG)
 	$(JTREG) -a -v:fail,error               \
           $(JTREG_KEY_OPTION)                   \
           $(EXTRA_JTREG_OPTIONS)                \
-          -r:$(shell $(GETMIXEDPATH) "$(ABS_TEST_OUTPUT_DIR)")/JTreport    \
-          -w:$(shell $(GETMIXEDPATH) "$(ABS_TEST_OUTPUT_DIR)")/JTwork      \
-          -jdk:$(shell $(GETMIXEDPATH) "$(PRODUCT_HOME)")                  \
+          -r:$(ABS_TEST_OUTPUT_DIR)/JTreport    \
+          -w:$(ABS_TEST_OUTPUT_DIR)/JTwork      \
+          -jdk:$(PRODUCT_HOME)                  \
           $(JAVA_OPTIONS:%=-vmoption:%)         \
           $(JTREG_TESTDIRS)                     \
 	  || $(BUNDLE_UP_FAILED)
@@ -210,7 +208,9 @@ clienttest: prep $(PRODUCT_HOME)
 	$(PRODUCT_HOME)/bin/java $(JAVA_OPTIONS) -help
 	$(PRODUCT_HOME)/bin/java $(JAVA_OPTIONS) -X
 	$(RM) $(PRODUCT_HOME)/jre/lib/*/client/classes.jsa
+	$(RM) $(PRODUCT_HOME)/jre/lib/*/client/classes_g.jsa
 	$(RM) $(PRODUCT_HOME)/jre/bin/client/classes.jsa
+	$(RM) $(PRODUCT_HOME)/jre/bin/client/classes_g.jsa
 	$(PRODUCT_HOME)/bin/java $(JAVA_OPTIONS) -Xshare:dump
 
 PHONY_LIST += clienttest
