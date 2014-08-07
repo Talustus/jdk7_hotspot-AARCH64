@@ -1,5 +1,6 @@
 #
 # Copyright (c) 2005, 2013, Oracle and/or its affiliates. All rights reserved.
+# Copyright (c) 2013 Red Hat, Inc.
 # DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
 #
 # This code is free software; you can redistribute it and/or modify it
@@ -55,8 +56,8 @@
 # having to read the dependency files for the vm.
 
 -include $(SPEC)
-include $(GAMMADIR)/make/scm.make
 include $(GAMMADIR)/make/defs.make
+include $(GAMMADIR)/make/scm.make
 include $(GAMMADIR)/make/altsrc.make
 
 
@@ -219,6 +220,7 @@ flags.make: $(BUILDTREE_MAKE) ../shared_dirs.lst
 	echo "HOTSPOT_BUILD_USER = $(HOTSPOT_BUILD_USER)"; \
 	echo "HOTSPOT_VM_DISTRO = $(HOTSPOT_VM_DISTRO)"; \
 	echo "OPENJDK = $(OPENJDK)"; \
+	echo "ZERO_BUILD = $(ZERO_BUILD)"; \
 	echo "$(LP64_SETTING/$(DATA_MODE))"; \
 	echo; \
 	echo "# Used for platform dispatching"; \
