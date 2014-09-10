@@ -37,11 +37,6 @@
 #include "c1/c1_Runtime1.hpp"
 #endif
 
-void NativeInstruction::wrote(int offset) {
-  // FIXME: Native needs ISB here
-; }
-
-
 void NativeCall::verify() { ; }
 
 address NativeCall::destination() const {
@@ -60,9 +55,12 @@ void NativeCall::insert(address code_pos, address entry) { Unimplemented(); }
 void NativeCall::replace_mt_safe(address instr_addr, address code_buffer) { Unimplemented(); }
 
 
+//-------------------------------------------------------------------
+
 void NativeMovConstReg::verify() {
   // make sure code pattern is actually mov reg64, imm64 instructions
 }
+
 
 intptr_t NativeMovConstReg::data() const {
   // das(uint64_t(instruction_address()),2);
@@ -80,6 +78,7 @@ void NativeMovConstReg::set_data(intptr_t x) {
     *(intptr_t*)addr = x;
   } else {
     MacroAssembler::pd_patch_instruction(instruction_address(), (address)x);
+    ICache::invalidate_range(instruction_address(), instruction_size);
   }
 };
 
@@ -116,6 +115,7 @@ void NativeMovRegMem::set_offset(int x) {
     *(long*)addr = x;
   } else {
     MacroAssembler::pd_patch_instruction(pc, (address)intptr_t(x));
+    ICache::invalidate_range(instruction_address(), instruction_size);
   }
 }
 
@@ -164,7 +164,10 @@ void NativeJump::set_jump_destination(address dest) {
     dest = instruction_address();
 
   MacroAssembler::pd_patch_instruction(instruction_address(), dest);
+  ICache::invalidate_range(instruction_address(), instruction_size);
 };
+
+//-------------------------------------------------------------------
 
 bool NativeInstruction::is_safepoint_poll() {
   // a safepoint_poll is implemented in two steps as either
@@ -207,7 +210,9 @@ bool NativeInstruction::is_ldrw_to_zr(address instr) {
           Instruction_aarch64::extract(insn, 4, 0) == 0b11111);
 }
 
-// MT safe inserting of a jump over an unknown instruction sequence (used by nmethod::makeZombie)
+//-------------------------------------------------------------------
+
+// MT safe inserting of a jump over a jump or a nop (used by nmethod::makeZombie)
 
 void NativeJump::patch_verified_entry(address entry, address verified_entry, address dest) {
   ptrdiff_t disp = dest - verified_entry;
