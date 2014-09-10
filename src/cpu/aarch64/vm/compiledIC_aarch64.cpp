@@ -106,15 +106,13 @@ void CompiledStaticCall::emit_to_interp_stub(CodeBuffer &cbuf, address mark) {
 #undef __
 
 int CompiledStaticCall::to_interp_stub_size() {
-  // count a mov mem --> to 4 movz/k and a branch
-  return 6 * NativeInstruction::instruction_size;
+  // count a mov mem --> to 3 movz/k and a branch
+  return 4 * NativeInstruction::instruction_size;
 }
 
 // Relocation entries for call stub, compiled java to interpreter.
 int CompiledStaticCall::reloc_to_interp_stub() {
-  // TODO fixme
-  // return a large number
-  return 5;
+  return 4; // 3 in emit_to_interp_stub + 1 in emit_call
 }
 
 void CompiledStaticCall::set_to_interpreted(methodHandle callee, address entry) {
@@ -141,6 +139,7 @@ void CompiledStaticCall::set_to_interpreted(methodHandle callee, address entry) 
   method_holder->set_data((intptr_t)callee());
   jump->set_jump_destination(entry);
 
+  ICache::invalidate_range(stub, to_interp_stub_size());
   // Update jump to call.
   set_destination_mt_safe(stub);
 }
@@ -152,9 +151,7 @@ void CompiledStaticCall::set_stub_to_clean(static_stub_Relocation* static_stub) 
   assert(stub != NULL, "stub not found");
   // Creation also verifies the object.
   NativeMovConstReg* method_holder = nativeMovConstReg_at(stub);
-  NativeJump*        jump          = nativeJump_at(method_holder->next_instruction_address());
   method_holder->set_data(0);
-  jump->set_jump_destination((address)-1);
 }
 
 //-----------------------------------------------------------------------------
