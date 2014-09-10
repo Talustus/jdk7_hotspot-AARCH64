@@ -1275,6 +1275,10 @@ public:
   void update_word_crc32(Register crc, Register v, Register tmp,
         Register table0, Register table1, Register table2, Register table3,
         bool upper = false);
+
+
+  // ISB may be needed because of a safepoint
+  void maybe_isb() { isb(); }
 };
 
 // Used by aarch64.ad to control code generation
