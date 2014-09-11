@@ -26,6 +26,7 @@
 
 #include "precompiled.hpp"
 #include "asm/assembler.hpp"
+#include "c1/c1_CodeStubs.hpp"
 #include "c1/c1_Compilation.hpp"
 #include "c1/c1_LIRAssembler.hpp"
 #include "c1/c1_MacroAssembler.hpp"
@@ -177,10 +178,6 @@ static jlong as_long(LIR_Opr data) {
   return result;
 }
 
-static bool is_reg(LIR_Opr op) {
-  return op->is_double_cpu() | op->is_single_cpu();
-}
-
 Address LIR_Assembler::as_Address(LIR_Address* addr, Register tmp) {
   Register base = addr->base()->as_pointer_register();
   LIR_Opr opr = addr->index();
@@ -204,8 +201,7 @@ Address LIR_Assembler::as_Address(LIR_Address* addr, Register tmp) {
     if (Address::offset_ok_for_immed(addr_offset, addr->scale()))
       return Address(base, addr_offset, Address::lsl(addr->scale()));
     else {
-      address const_addr = int_constant(addr_offset);
-      __ ldr_constant(tmp, const_addr);
+      __ mov(tmp, addr_offset);
       return Address(base, tmp, Address::lsl(addr->scale()));
     }
   }
@@ -294,23 +290,25 @@ void LIR_Assembler::osr_entry() {
 int LIR_Assembler::check_icache() {
   Register receiver = FrameMap::receiver_opr->as_register();
   Register ic_klass = IC_Klass;
-  const int ic_cmp_size = 4 * 4;
-  const bool do_post_padding = VerifyOops || UseCompressedClassPointers;
-  if (!do_post_padding) {
-    // insert some nops so that the verified entry point is aligned on CodeEntryAlignment
-    while ((__ offset() + ic_cmp_size) % CodeEntryAlignment != 0) {
-      __ nop();
-    }
-  }
-  int offset = __ offset();
-  __ inline_cache_check(receiver, IC_Klass);
-  assert(__ offset() % CodeEntryAlignment == 0 || do_post_padding, "alignment must be correct");
-  if (do_post_padding) {
+  int start_offset = __ offset();
+  __ inline_cache_check(receiver, ic_klass);
+
+  // if icache check fails, then jump to runtime routine
+  // Note: RECEIVER must still contain the receiver!
+  Label dont;
+  __ br(Assembler::EQ, dont);
+  __ b(RuntimeAddress(SharedRuntime::get_ic_miss_stub()));
+
+  // We align the verified entry point unless the method body
+  // (including its inline cache check) will fit in a single 64-byte
+  // icache line.
+  if (! method()->is_accessor() || __ offset() - start_offset > 4 * 4) {
     // force alignment after the cache check.
-    // It's been verified to be aligned if !VerifyOops
     __ align(CodeEntryAlignment);
   }
-  return offset;
+
+  __ bind(dont);
+  return start_offset;
 }
 
 
@@ -318,34 +316,41 @@ void LIR_Assembler::jobject2reg(jobject o, Register reg) {
   if (o == NULL) {
     __ mov(reg, zr);
   } else {
-    int oop_index = __ oop_recorder()->find_index(o);
-    assert(Universe::heap()->is_in_reserved(JNIHandles::resolve(o)), "should be real oop");
-    RelocationHolder rspec = oop_Relocation::spec(oop_index);
-    address const_ptr = int_constant(jlong(o));
-    __ code()->consts()->relocate(const_ptr, rspec);
-    __ ldr_constant(reg, const_ptr);
-
-    if (PrintRelocations && Verbose) {
-	puts("jobject2reg:\n");
-	printf("oop %p  at %p\n", o, const_ptr);
-	fflush(stdout);
-	das((uint64_t)__ pc(), -2);
-    }
+    __ movoop(reg, o, /*immediate*/true);
   }
 }
 
 
-void LIR_Assembler::jobject2reg_with_patching(Register reg, CodeEmitInfo *info) {
-  // Allocate a new index in table to hold the object once it's been patched
-  int oop_index = __ oop_recorder()->allocate_oop_index(NULL);
-//  PatchingStub* patch = new PatchingStub(_masm, PatchingStub::load_mirror_id, oop_index);
-  PatchingStub* patch = new PatchingStub(_masm, patching_id(info), oop_index);
+void LIR_Assembler::deoptimize_trap(CodeEmitInfo *info) {
+  address target = NULL;
+  relocInfo::relocType reloc_type = relocInfo::none;
 
-  RelocationHolder rspec = oop_Relocation::spec(oop_index);
-  address const_ptr = int_constant(-1);
-  __ code()->consts()->relocate(const_ptr, rspec);
-  __ ldr_constant(reg, const_ptr);
-  patching_epilog(patch, lir_patch_normal, reg, info);
+  switch (patching_id(info)) {
+  case PatchingStub::access_field_id:
+    target = Runtime1::entry_for(Runtime1::access_field_patching_id);
+    reloc_type = relocInfo::section_word_type;
+    break;
+  case PatchingStub::load_klass_id:
+    target = Runtime1::entry_for(Runtime1::load_klass_patching_id);
+    reloc_type = relocInfo::metadata_type;
+    break;
+  case PatchingStub::load_mirror_id:
+    target = Runtime1::entry_for(Runtime1::load_mirror_patching_id);
+    reloc_type = relocInfo::oop_type;
+    break;
+  case PatchingStub::load_appendix_id:
+    target = Runtime1::entry_for(Runtime1::load_appendix_patching_id);
+    reloc_type = relocInfo::oop_type;
+    break;
+  default: ShouldNotReachHere();
+  }
+
+  __ bl(RuntimeAddress(target));
+  add_call_info_here(info);
+}
+
+void LIR_Assembler::jobject2reg_with_patching(Register reg, CodeEmitInfo *info) {
+  deoptimize_trap(info);
 }
 
 
@@ -520,7 +525,7 @@ void LIR_Assembler::poll_for_safepoint(relocInfo::relocType rtype, CodeEmitInfo*
   __ pop(0x3, sp);                 // r0 & r1
   __ leave();
   __ br(rscratch1);
-  address polling_page(os::get_polling_page() + (SafepointPollOffset % os::vm_page_size()));
+  address polling_page(os::get_polling_page());
   assert(os::is_poll_address(polling_page), "should be");
   unsigned long off;
   __ adrp(rscratch1, Address(polling_page, rtype), off);
@@ -539,7 +544,7 @@ void LIR_Assembler::return_op(LIR_Opr result) {
   // Pop the stack before the safepoint code
   __ remove_frame(initial_frame_size_in_bytes());
   if (UseCompilerSafepoints) {
-    address polling_page(os::get_polling_page() + (SafepointPollOffset % os::vm_page_size()));
+    address polling_page(os::get_polling_page());
     __ read_polling_page(rscratch1, polling_page, relocInfo::poll_return_type);
   } else {
     poll_for_safepoint(relocInfo::poll_return_type);
@@ -548,8 +553,7 @@ void LIR_Assembler::return_op(LIR_Opr result) {
 }
 
 int LIR_Assembler::safepoint_poll(LIR_Opr tmp, CodeEmitInfo* info) {
-  address polling_page(os::get_polling_page()
-		       + (SafepointPollOffset % os::vm_page_size()));
+  address polling_page(os::get_polling_page());
   if (UseCompilerSafepoints) {
     guarantee(info != NULL, "Shouldn't be NULL");
     assert(os::is_poll_address(polling_page), "should be");
@@ -814,21 +818,19 @@ void LIR_Assembler::reg2mem(LIR_Opr src, LIR_Opr dest, BasicType type, LIR_Patch
   PatchingStub* patch = NULL;
   Register compressed_src = rscratch1;
 
+  if (patch_code != lir_patch_none) {
+    deoptimize_trap(info);
+    return;
+  }
+
   if (type == T_ARRAY || type == T_OBJECT) {
     __ verify_oop(src->as_register());
 
     if (UseCompressedOops && !wide) {
       __ encode_heap_oop(compressed_src, src->as_register());
-      if (patch_code != lir_patch_none) {
-        info->oop_map()->set_narrowoop(compressed_src->as_VMReg());
-      }
     } else {
       compressed_src = src->as_register();
     }
-  }
-
-  if (patch_code != lir_patch_none) {
-    patch = new PatchingStub(_masm, PatchingStub::access_field_id);
   }
 
   int null_check_here = code_offset();
@@ -888,10 +890,6 @@ void LIR_Assembler::reg2mem(LIR_Opr src, LIR_Opr dest, BasicType type, LIR_Patch
   if (info != NULL) {
     add_debug_info_for_null_check(null_check_here, info);
   }
-
-  if (patch_code != lir_patch_none) {
-    patching_epilog(patch, patch_code, to_addr->base()->as_register(), info);
-  }
 }
 
 
@@ -928,10 +926,31 @@ void LIR_Assembler::stack2reg(LIR_Opr src, LIR_Opr dest, BasicType type) {
 
 
 void LIR_Assembler::klass2reg_with_patching(Register reg, CodeEmitInfo* info) {
-  Metadata* o = NULL;
-  PatchingStub* patch = new PatchingStub(_masm, PatchingStub::load_klass_id);
-  __ mov_metadata(reg, o);
-  patching_epilog(patch, lir_patch_normal, reg, info);
+  address target = NULL;
+  relocInfo::relocType reloc_type = relocInfo::none;
+
+  switch (patching_id(info)) {
+  case PatchingStub::access_field_id:
+    target = Runtime1::entry_for(Runtime1::access_field_patching_id);
+    reloc_type = relocInfo::section_word_type;
+    break;
+  case PatchingStub::load_klass_id:
+    target = Runtime1::entry_for(Runtime1::load_klass_patching_id);
+    reloc_type = relocInfo::metadata_type;
+    break;
+  case PatchingStub::load_mirror_id:
+    target = Runtime1::entry_for(Runtime1::load_mirror_patching_id);
+    reloc_type = relocInfo::oop_type;
+    break;
+  case PatchingStub::load_appendix_id:
+    target = Runtime1::entry_for(Runtime1::load_appendix_patching_id);
+    reloc_type = relocInfo::oop_type;
+    break;
+  default: ShouldNotReachHere();
+  }
+
+  __ bl(RuntimeAddress(target));
+  add_call_info_here(info);
 }
 
 void LIR_Assembler::stack2stack(LIR_Opr src, LIR_Opr dest, BasicType type) {
@@ -954,10 +973,9 @@ void LIR_Assembler::mem2reg(LIR_Opr src, LIR_Opr dest, BasicType type, LIR_Patch
     __ verify_oop(addr->base()->as_pointer_register());
   }
 
-  PatchingStub* patch = NULL;
-
   if (patch_code != lir_patch_none) {
-    patch = new PatchingStub(_masm, PatchingStub::access_field_id);
+    deoptimize_trap(info);
+    return;
   }
 
   if (info != NULL) {
@@ -1027,10 +1045,6 @@ void LIR_Assembler::mem2reg(LIR_Opr src, LIR_Opr dest, BasicType type, LIR_Patch
 
     default:
       ShouldNotReachHere();
-  }
-
-  if (patch != NULL) {
-    patching_epilog(patch, patch_code, addr->base()->as_register(), info);
   }
 
   if (type == T_ARRAY || type == T_OBJECT) {
@@ -2747,148 +2761,12 @@ void LIR_Assembler::rt_call(LIR_Opr result, address dest, const LIR_OprList* arg
 }
 
 void LIR_Assembler::volatile_move_op(LIR_Opr src, LIR_Opr dest, BasicType type, CodeEmitInfo* info) {
-  if (dest->is_address()) {
-      LIR_Address* to_addr = dest->as_address_ptr();
-      Register compressed_src = noreg;
-      if (is_reg(src)) {
-	  compressed_src = as_reg(src);
-	  if (type == T_ARRAY || type == T_OBJECT) {
-	    __ verify_oop(src->as_register());
-	    if (UseCompressedOops) {
-	      compressed_src = rscratch2;
-	      __ mov(compressed_src, src->as_register());
-	      __ encode_heap_oop(compressed_src);
-	    }
-	  }
-      } else if (src->is_single_fpu()) {
-	__ fmovs(rscratch2, src->as_float_reg());
-	src = FrameMap::rscratch2_opr,	type = T_INT;
-      } else if (src->is_double_fpu()) {
-	__ fmovd(rscratch2, src->as_double_reg());
-	src = FrameMap::rscratch2_long_opr, type = T_LONG;
-      }
-
-      if (dest->is_double_cpu())
-	__ lea(rscratch1, as_Address(to_addr));
-      else
-	__ lea(rscratch1, as_Address_lo(to_addr));
-
-      int null_check_here = code_offset();
-      switch (type) {
-      case T_ARRAY:   // fall through
-      case T_OBJECT:  // fall through
-	if (UseCompressedOops) {
-	  __ stlrw(compressed_src, rscratch1);
-	} else {
-	  __ stlr(compressed_src, rscratch1);
-	}
-	break;
-      case T_METADATA:
-	// We get here to store a method pointer to the stack to pass to
-	// a dtrace runtime call. This can't work on 64 bit with
-	// compressed klass ptrs: T_METADATA can be a compressed klass
-	// ptr or a 64 bit method pointer.
-	LP64_ONLY(ShouldNotReachHere());
-	__ stlr(src->as_register(), rscratch1);
-	break;
-      case T_ADDRESS:
-	__ stlr(src->as_register(), rscratch1);
-	break;
-      case T_INT:
-	__ stlrw(src->as_register(), rscratch1);
-	break;
-
-      case T_LONG: {
-	__ stlr(src->as_register_lo(), rscratch1);
-	break;
-      }
-
-      case T_BYTE:    // fall through
-      case T_BOOLEAN: {
-	__ stlrb(src->as_register(), rscratch1);
-	break;
-      }
-
-      case T_CHAR:    // fall through
-      case T_SHORT:
-	__ stlrh(src->as_register(), rscratch1);
-	break;
-
-      default:
-	ShouldNotReachHere();
-      }
-      if (info != NULL) {
-	add_debug_info_for_null_check(null_check_here, info);
-      }
-  } else if (src->is_address()) {
-    LIR_Address* from_addr = src->as_address_ptr();
-
-    if (src->is_double_cpu())
-      __ lea(rscratch1, as_Address(from_addr));
-    else
-      __ lea(rscratch1, as_Address_lo(from_addr));
-
-    int null_check_here = code_offset();
-    switch (type) {
-    case T_ARRAY:   // fall through
-    case T_OBJECT:  // fall through
-      if (UseCompressedOops) {
-	__ ldarw(dest->as_register(), rscratch1);
-      } else {
-	__ ldar(dest->as_register(), rscratch1);
-      }
-      break;
-    case T_ADDRESS:
-      __ ldar(dest->as_register(), rscratch1);
-      break;
-    case T_INT:
-      __ ldarw(dest->as_register(), rscratch1);
-      break;
-    case T_LONG: {
-      __ ldar(dest->as_register_lo(), rscratch1);
-      break;
-    }
-
-    case T_BYTE:    // fall through
-    case T_BOOLEAN: {
-      __ ldarb(dest->as_register(), rscratch1);
-      break;
-    }
-
-    case T_CHAR:    // fall through
-    case T_SHORT:
-      __ ldarh(dest->as_register(), rscratch1);
-      break;
-
-    case T_FLOAT:
-      __ ldarw(rscratch2, rscratch1);
-      __ fmovs(dest->as_float_reg(), rscratch2);
-      break;
-
-    case T_DOUBLE:
-      __ ldar(rscratch2, rscratch1);
-      __ fmovd(dest->as_double_reg(), rscratch2);
-      break;
-
-    default:
-      ShouldNotReachHere();
-    }
-    if (info != NULL) {
-      add_debug_info_for_null_check(null_check_here, info);
-    }
-
-    if (type == T_ARRAY || type == T_OBJECT) {
-      if (UseCompressedOops) {
-	__ decode_heap_oop(dest->as_register());
-      }
-      __ verify_oop(dest->as_register());
-    } else if (type == T_ADDRESS && from_addr->disp() == oopDesc::klass_offset_in_bytes()) {
-      if (UseCompressedClassPointers) {
-	__ decode_klass_not_null(dest->as_register());
-      }
-    }
-  } else
+  if (dest->is_address() || src->is_address()) {
+    move_op(src, dest, type, lir_patch_none, info,
+            /*pop_fpu_stack*/false, /*unaligned*/false, /*wide*/false);
+  } else {
     ShouldNotReachHere();
+  }
 }
 
 #ifdef ASSERT
@@ -2942,17 +2820,18 @@ void LIR_Assembler::membar() {
 }
 
 void LIR_Assembler::membar_acquire() {
-  __ block_comment("membar_acquire");
+  __ membar(Assembler::LoadLoad|Assembler::LoadStore);
 }
 
 void LIR_Assembler::membar_release() {
-  __ block_comment("membar_release");
+  __ membar(Assembler::LoadStore|Assembler::StoreStore);
 }
 
-void LIR_Assembler::membar_loadload() { Unimplemented(); }
+void LIR_Assembler::membar_loadload() {
+  __ membar(Assembler::LoadLoad);
+}
 
 void LIR_Assembler::membar_storestore() {
-  COMMENT("membar_storestore");
   __ membar(MacroAssembler::StoreStore);
 }
 

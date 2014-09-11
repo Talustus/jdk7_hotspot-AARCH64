@@ -375,6 +375,15 @@ reg_class any_reg32(
     R30
 );
 
+// Singleton class for R0 int register
+reg_class int_r0_reg(R0);
+
+// Singleton class for R2 int register
+reg_class int_r2_reg(R2);
+
+// Singleton class for R4 int register
+reg_class int_r4_reg(R4);
+
 // Class for all long integer registers (including RSP)
 reg_class any_reg(
     R0, R0_H,
@@ -482,9 +491,19 @@ reg_class r0_reg(
     R0, R0_H
 );
 
+// Class for 64 bit register r1
+reg_class r1_reg(
+    R1, R1_H
+);
+
 // Class for 64 bit register r2
 reg_class r2_reg(
     R2, R2_H
+);
+
+// Class for 64 bit register r3
+reg_class r3_reg(
+    R3, R3_H
 );
 
 // Class for 64 bit register r4
@@ -751,19 +770,7 @@ int MachCallStaticJavaNode::ret_addr_offset()
 
 int MachCallDynamicJavaNode::ret_addr_offset()
 {
-  // call should be
-  //   ldr_constant
-  //   bl
-  // where ldr_constant is either
-  //   ldr // if NearCpool
-  // or
-  //   adrp // if !NearCPool
-  //   ldr
-  int off = 8;
-  if (!NearCpool) {
-    off += 4;
-  }
-  return off;
+  return 16; // movz, movk, movk, bl
 }
 
 int MachCallRuntimeNode::ret_addr_offset() {
@@ -776,7 +783,8 @@ int MachCallRuntimeNode::ret_addr_offset() {
   if (cb) {
     return 4;
   } else {
-    return 20;
+    // A 48-bit address.  See movptr().
+    return 16;
   }
 }
 
@@ -868,7 +876,7 @@ void MachPrologNode::format(PhaseRegAlloc *ra_, outputStream *st) const {
   if (framesize == 0) {
     // Is this even possible?
     st->print("stp  lr, rfp, [sp, #%d]!", -(2 * wordSize)); 
-  } else if (framesize < (1 << 12)) {
+  } else if (framesize < ((1 << 9) + 2 * wordSize)) {
     st->print("sub  sp, sp, #%d\n\t", framesize);
     st->print("stp  rfp, lr, [sp, #%d]", framesize - 2 * wordSize);
   } else {
@@ -894,17 +902,7 @@ void MachPrologNode::emit(CodeBuffer &cbuf, PhaseRegAlloc *ra_) const {
   if (C->need_stack_bang(framesize))
     __ generate_stack_overflow_check(framesize);
 
-  if (framesize == 0) {
-    // Is this even possible?
-    __ stp(rfp, lr, Address(__ pre(sp, -2 * wordSize)));
-  } else if (framesize < (1 << 12)) {
-    __ sub(sp, sp, framesize);
-    __ stp(rfp, lr, Address(sp, framesize - 2 * wordSize));
-  } else {
-    __ stp(rfp, lr, Address(__ pre(sp, -2 * wordSize)));
-    __ mov(rscratch1, framesize - 2 * wordSize);
-    __ sub(sp, sp, rscratch1);
-  }
+  __ build_frame(framesize);
 
   if (NotifySimulator) {
     __ notify(Assembler::method_entry);
@@ -946,7 +944,7 @@ void MachEpilogNode::format(PhaseRegAlloc *ra_, outputStream *st) const {
 
   if (framesize == 0) {
     st->print("ldp  lr, rfp, [sp],#%d\n\t", (2 * wordSize));
-  } else if (framesize < (1 << 12)) {
+  } else if (framesize < ((1 << 9) + 2 * wordSize)) {
     st->print("ldp  lr, rfp, [sp,#%d]\n\t", framesize - 2 * wordSize);
     st->print("add  sp, sp, #%d\n\t", framesize);
   } else {
@@ -968,16 +966,7 @@ void MachEpilogNode::emit(CodeBuffer &cbuf, PhaseRegAlloc *ra_) const {
   MacroAssembler _masm(&cbuf);
   int framesize = C->frame_slots() << LogBytesPerInt;
 
-  if (framesize == 0) {
-    __ ldp(rfp, lr, Address(__ post(sp, 2 * wordSize)));
-  } else if (framesize < (1 << 12)) {
-    __ ldp(rfp, lr, Address(sp, framesize - 2 * wordSize));
-    __ add(sp, sp, framesize);
-  } else {
-    __ mov(rscratch1, framesize - 2 * wordSize);
-    __ add(sp, sp, rscratch1);
-    __ ldp(rfp, lr, Address(__ post(sp, 2 * wordSize)));
-  }
+  __ remove_frame(framesize);
 
   if (NotifySimulator) {
     __ notify(Assembler::method_reentry);
@@ -2033,7 +2022,6 @@ encode %{
   //   movz xscratch1 0xnnnn        <-- current pc is here
   //   movk xscratch1 0xnnnn
   //   movk xscratch1 0xnnnn
-  //   movk xscratch1 0xnnnn
   //   str xscratch1, [xthread,#anchor_pc_off]
   //   mov xscratch2, sp
   //   str xscratch2, [xthread,#anchor_sp_off
@@ -2045,7 +2033,6 @@ encode %{
   //   movz xscratch1 0xnnnn
   //   movk xscratch1 0xnnnn
   //   movk xscratch1 0xnnnn
-  //   movk xscratch1 0xnnnn
   //   blrt xscratch1
   //   . . .
   //
@@ -2055,18 +2042,18 @@ encode %{
   // stub. we assert that nargs is < 7.
   //
   // so the offset we need to add to the pc (in 32-bit words) is
-  //   4 +        <-- load 64 bit constant return pc
+  //   3 +        <-- load 48-bit constant return pc
   //   1 +        <-- write anchor pc
   //   1 +        <-- copy sp
   //   1 +        <-- write anchor sp
   //   nargs +    <-- java stub arg count
   //   1 +        <-- extra thread arg
   // [ 1 + ]      <-- optional ret address of stub caller
-  //   4 +        <-- load 64 bit call target address
+  //   3 +        <-- load 64 bit call target address
   //   1          <-- blrt instruction
   //
-  // i.e we need to add (nargs + 13) * 4 bytes or (nargs + 14) * 4 bytes
-  // 
+  // i.e we need to add (nargs + 11) * 4 bytes or (nargs + 12) * 4 bytes
+  //
 
   enc_class aarch64_enc_save_pc() %{
     Compile* C = ra_->C;
@@ -2075,10 +2062,10 @@ encode %{
     assert(nargs <= 8, "opto runtime stub has more than 8 args!");
     MacroAssembler _masm(&cbuf);
     address pc = __ pc();
-    int call_offset = (nargs + 13) * 4;
+    int call_offset = (nargs + 11) * 4;
     int field_offset = in_bytes(JavaThread::frame_anchor_offset()) +
                        in_bytes(JavaFrameAnchor::last_Java_pc_offset());
-    __ mov(rscratch1, InternalAddress(pc + call_offset));
+    __ lea(rscratch1, InternalAddress(pc + call_offset));
     __ str(rscratch1, Address(rthread, field_offset));
   %}
 
@@ -2767,8 +2754,6 @@ encode %{
     address mark = __ pc();
     address addr = (address)$meth$$method;
     if (!_method) {
-      // TODO check this
-      // think we are calling generated Java here not x86
       // A call to a runtime wrapper, e.g. new, new_typeArray_Java, uncommon_trap.
       __ bl(Address(addr, relocInfo::runtime_call_type));
     } else if (_optimized_virtual) {
@@ -2826,9 +2811,6 @@ encode %{
       __ call_Unimplemented();
     }
   %}
-  // TODO
-  // this only works ifdef BUILTIN_SIM
-  // provide version for native AArch64 build
 
   enc_class aarch64_enc_java_to_runtime(method meth) %{
     MacroAssembler _masm(&cbuf);
@@ -2846,7 +2828,7 @@ encode %{
       int fpcnt;
       int rtype;
       getCallInfo(tf(), gpcnt, fpcnt, rtype);
-      __ mov(rscratch1, RuntimeAddress(entry));
+      __ lea(rscratch1, RuntimeAddress(entry));
       __ blrt(rscratch1, gpcnt, fpcnt, rtype);
     }
   %}
@@ -3953,10 +3935,34 @@ operand iRegP_R0()
   interface(REG_INTER);
 %}
 
+// Pointer 64 bit Register R1 only
+operand iRegP_R1()
+%{
+  constraint(ALLOC_IN_RC(r1_reg));
+  match(RegP);
+  // match(iRegP);
+  match(iRegPNoSp);
+  op_cost(0);
+  format %{ %}
+  interface(REG_INTER);
+%}
+
 // Pointer 64 bit Register R2 only
 operand iRegP_R2()
 %{
   constraint(ALLOC_IN_RC(r2_reg));
+  match(RegP);
+  // match(iRegP);
+  match(iRegPNoSp);
+  op_cost(0);
+  format %{ %}
+  interface(REG_INTER);
+%}
+
+// Pointer 64 bit Register R3 only
+operand iRegP_R3()
+%{
+  constraint(ALLOC_IN_RC(r3_reg));
   match(RegP);
   // match(iRegP);
   match(iRegPNoSp);
@@ -4026,7 +4032,29 @@ operand iRegP_FP()
 // Register R0 only
 operand iRegI_R0()
 %{
-  constraint(ALLOC_IN_RC(r0_reg));
+  constraint(ALLOC_IN_RC(int_r0_reg));
+  match(RegI);
+  match(iRegINoSp);
+  op_cost(0);
+  format %{ %}
+  interface(REG_INTER);
+%}
+
+// Register R2 only
+operand iRegI_R2()
+%{
+  constraint(ALLOC_IN_RC(int_r2_reg));
+  match(RegI);
+  match(iRegINoSp);
+  op_cost(0);
+  format %{ %}
+  interface(REG_INTER);
+%}
+
+// Register R4 only
+operand iRegI_R4()
+%{
+  constraint(ALLOC_IN_RC(int_r4_reg));
   match(RegI);
   match(iRegINoSp);
   op_cost(0);
@@ -7381,6 +7409,21 @@ instruct mulI(iRegINoSp dst, iRegIorL2I src1, iRegIorL2I src2) %{
     __ mulw(as_Register($dst$$reg),
             as_Register($src1$$reg),
             as_Register($src2$$reg));
+  %}
+
+  ins_pipe(pipe_class_default);
+%}
+
+instruct smulI(iRegLNoSp dst, iRegIorL2I src1, iRegIorL2I src2) %{
+  match(Set dst (MulL (ConvI2L src1) (ConvI2L src2)));
+
+  ins_cost(INSN_COST * 3);
+  format %{ "smull  $dst, $src1, $src2" %}
+
+  ins_encode %{
+    __ smull(as_Register($dst$$reg),
+	     as_Register($src1$$reg),
+	     as_Register($src2$$reg));
   %}
 
   ins_pipe(pipe_class_default);
@@ -11326,6 +11369,36 @@ instruct partialSubtypeCheckVsZero(iRegP_R4 sub, iRegP_R0 super, iRegP_R2 temp, 
 
   opcode(0x0); // Don't zero result reg on hit
 
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct string_compare(iRegP_R1 str1, iRegI_R2 cnt1, iRegP_R3 str2, iRegI_R4 cnt2,
+                        iRegI_R0 result, iRegP_R10 tmp1, rFlagsReg cr)
+%{
+  match(Set result (StrComp (Binary str1 cnt1) (Binary str2 cnt2)));
+  effect(KILL tmp1, USE_KILL str1, USE_KILL str2, USE_KILL cnt1, USE_KILL cnt2, KILL cr);
+
+  format %{ "String Compare $str1,$cnt1,$str2,$cnt2 -> $result   # KILL $tmp1" %}
+  ins_encode %{
+    __ string_compare($str1$$Register, $str2$$Register,
+                      $cnt1$$Register, $cnt2$$Register, $result$$Register,
+                      $tmp1$$Register);
+  %}
+  ins_pipe(pipe_class_memory);
+%}
+
+instruct string_equals(iRegP_R1 str1, iRegP_R3 str2, iRegI_R4 cnt,
+                        iRegI_R0 result, iRegP_R10 tmp, rFlagsReg cr)
+%{
+  match(Set result (StrEquals (Binary str1 str2) cnt));
+  effect(KILL tmp, USE_KILL str1, USE_KILL str2, USE_KILL cnt, KILL cr);
+
+  format %{ "String Equals $str1,$str2,$cnt -> $result    // KILL $tmp" %}
+  ins_encode %{
+    __ string_equals($str1$$Register, $str2$$Register,
+		      $cnt$$Register, $result$$Register,
+                      $tmp$$Register);
+  %}
   ins_pipe(pipe_class_memory);
 %}
 
