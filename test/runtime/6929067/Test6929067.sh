@@ -1,7 +1,6 @@
 #!/bin/sh
 
 ##
-## @ignore 8028740
 ## @test Test6929067.sh
 ## @bug 6929067
 ## @bug 8021296
@@ -85,12 +84,8 @@ case "$ARCH" in
     ARCH=arm
     ;;
   aarch64)
-    # 64-bit arm machine, could be testing 32 or 64-bit:
-    if [ "$COMP_FLAG" = "-m32" ]; then
-      ARCH=arm
-    else 
-      ARCH=aarch64
-    fi
+    # 64-bit arm machine: compiler does not recognise -m64
+    COMP_FLAG=""
     ;;
   i586)
     ARCH=i386
@@ -129,7 +124,7 @@ echo "VM type: ${VMTYPE}"
 $gcc_cmd -DLINUX ${COMP_FLAG} -o invoke \
     -I${COMPILEJAVA}/include -I${COMPILEJAVA}/include/linux \
     -L${COMPILEJAVA}/jre/lib/${ARCH}/${VMTYPE} \
-    -ljvm -lpthread invoke.c
+    invoke.c -ljvm -lpthread
 
 ./invoke
 exit $?

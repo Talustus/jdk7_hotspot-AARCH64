@@ -316,7 +316,7 @@ static void patch_callers_callsite(MacroAssembler *masm) {
 
   __ mov(c_rarg0, rmethod);
   __ mov(c_rarg1, lr);
-  __ mov(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, SharedRuntime::fixup_callers_callsite)));
+  __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, SharedRuntime::fixup_callers_callsite)));
   __ blrt(rscratch1, 2, 0, 0);
   __ maybe_isb();
 
@@ -1167,7 +1167,7 @@ static void rt_call(MacroAssembler* masm, address dest, int gpargs, int fpargs, 
   } else {
     assert((unsigned)gpargs < 256, "eek!");
     assert((unsigned)fpargs < 32, "eek!");
-    __ mov(rscratch1, RuntimeAddress(dest));
+    __ lea(rscratch1, RuntimeAddress(dest));
     __ mov(rscratch2, (gpargs << 6) | (fpargs << 2) | type);
     __ blrt(rscratch1, rscratch2);
     __ maybe_isb();
@@ -1528,8 +1528,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
 
   assert_different_registers(ic_reg, receiver, rscratch1);
   __ verify_oop(receiver);
-  __ load_klass(rscratch1, receiver);
-  __ cmp(ic_reg, rscratch1);
+  __ cmp_klass(receiver, ic_reg, rscratch1);
   __ br(Assembler::EQ, hit);
 
   __ b(RuntimeAddress(SharedRuntime::get_ic_miss_stub()));
@@ -1734,7 +1733,9 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   if (method->is_static() && !is_critical_native) {
 
     //  load oop into a register
-    __ movoop(oop_handle_reg, JNIHandles::make_local(method->method_holder()->java_mirror()));
+    __ movoop(oop_handle_reg,
+              JNIHandles::make_local(method->method_holder()->java_mirror()),
+              /*immediate*/true);
 
     // Now handlize the static class mirror it's known not-null.
     __ str(oop_handle_reg, Address(sp, klass_offset));
@@ -1925,7 +1926,7 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   if(os::is_MP()) {
     if (UseMembar) {
       // Force this write out before the read below
-      __ dsb(Assembler::SY);
+      __ dmb(Assembler::SY);
     } else {
       // Write serialization page so VM thread can do a pseudo remote membar.
       // We use the current thread pointer to calculate a thread specific
@@ -1964,9 +1965,9 @@ nmethod* SharedRuntime::generate_native_wrapper(MacroAssembler* masm,
   assert(frame::arg_reg_save_area_bytes == 0, "not expecting frame reg save area");
 #endif
     if (!is_critical_native) {
-      __ mov(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, JavaThread::check_special_condition_for_native_trans)));
+      __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, JavaThread::check_special_condition_for_native_trans)));
     } else {
-      __ mov(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, JavaThread::check_special_condition_for_native_trans_and_transition)));
+      __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, JavaThread::check_special_condition_for_native_trans_and_transition)));
     }
     __ blrt(rscratch1, 1, 0, 1);
     __ maybe_isb();
@@ -2388,7 +2389,7 @@ void SharedRuntime::generate_deopt_blob() {
   }
 #endif // ASSERT
   __ mov(c_rarg0, rthread);
-  __ mov(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, Deoptimization::fetch_unroll_info)));
+  __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, Deoptimization::fetch_unroll_info)));
   __ blrt(rscratch1, 1, 0, 1);
   __ bind(retaddr);
 
@@ -2518,7 +2519,7 @@ void SharedRuntime::generate_deopt_blob() {
 
   __ mov(c_rarg0, rthread);
   __ movw(c_rarg1, rcpool); // second arg: exec_mode
-  __ mov(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames)));
+  __ lea(rscratch1, RuntimeAddress(CAST_FROM_FN_PTR(address, Deoptimization::unpack_frames)));
   __ blrt(rscratch1, 2, 0, 0);
 
   // Set an oopmap for the call site
@@ -2873,7 +2874,7 @@ RuntimeStub* SharedRuntime::generate_resolve_blob(address destination, const cha
     __ set_last_Java_frame(sp, noreg, retaddr, rscratch1);
 
     __ mov(c_rarg0, rthread);
-    __ mov(rscratch1, RuntimeAddress(destination));
+    __ lea(rscratch1, RuntimeAddress(destination));
 
     __ blrt(rscratch1, 1, 0, 1);
     __ bind(retaddr);

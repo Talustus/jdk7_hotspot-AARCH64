@@ -82,7 +82,6 @@ void NativeMovConstReg::set_data(intptr_t x) {
   }
 };
 
-
 void NativeMovConstReg::print() {
   tty->print_cr(PTR_FORMAT ": mov reg, " INTPTR_FORMAT,
                 instruction_address(), data());
@@ -210,7 +209,13 @@ bool NativeInstruction::is_ldrw_to_zr(address instr) {
           Instruction_aarch64::extract(insn, 4, 0) == 0b11111);
 }
 
-//-------------------------------------------------------------------
+bool NativeInstruction::is_movz() {
+  return Instruction_aarch64::extract(int_at(0), 30, 23) == 0b10100101;
+}
+
+bool NativeInstruction::is_movk() {
+  return Instruction_aarch64::extract(int_at(0), 30, 23) == 0b11100101;
+}
 
 // MT safe inserting of a jump over a jump or a nop (used by nmethod::makeZombie)
 
@@ -247,8 +252,7 @@ void NativeGeneralJump::insert_unconditional(address code_pos, address entry) {
 
 // MT-safe patching of a long jump instruction.
 void NativeGeneralJump::replace_mt_safe(address instr_addr, address code_buffer) {
-  assert((! DeoptimizeWhenPatching)
-	 || nativeInstruction_at(instr_addr)->is_jump_or_nop(),
+  assert(nativeInstruction_at(instr_addr)->is_jump_or_nop(),
 	 "Aarch64 cannot replace non-jump with jump");
   uint32_t instr = *(uint32_t*)code_buffer;
   *(uint32_t*)instr_addr = instr;

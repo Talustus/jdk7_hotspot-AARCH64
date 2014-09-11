@@ -65,6 +65,7 @@
 #define BIND(label) bind(label); BLOCK_COMMENT(#label ":")
 
 void MacroAssembler::pd_patch_instruction(address branch, address target) {
+  assert((uint64_t)target < (1ul << 48), "48-bit overflow in address constant");
   long offset = (target - branch) >> 2;
   unsigned insn = *(unsigned*)branch;
   if ((Instruction_aarch64::extract(insn, 29, 24) & 0b111011) == 0b011000) {
@@ -136,19 +137,34 @@ void MacroAssembler::pd_patch_instruction(address branch, address target) {
     offset >>= 2;
     Instruction_aarch64::spatch(branch, 23, 5, offset);
     Instruction_aarch64::patch(branch, 30, 29, offset_lo);
-  } else if (Instruction_aarch64::extract(insn, 31, 23) == 0b110100101) {
-    // Move wide constant
+  } else if (Instruction_aarch64::extract(insn, 31, 21) == 0b11010010100) {
     u_int64_t dest = (u_int64_t)target;
+    // Move wide constant
+    assert(nativeInstruction_at(branch+4)->is_movk(), "wrong insns in patch");
+    assert(nativeInstruction_at(branch+8)->is_movk(), "wrong insns in patch");
     Instruction_aarch64::patch(branch, 20, 5, dest & 0xffff);
-    Instruction_aarch64::patch(branch += 4, 20, 5, (dest >>= 16) & 0xffff);
-    Instruction_aarch64::patch(branch += 4, 20, 5, (dest >>= 16) & 0xffff);
-    Instruction_aarch64::patch(branch += 4, 20, 5, (dest >>= 16));
+    Instruction_aarch64::patch(branch+4, 20, 5, (dest >>= 16) & 0xffff);
+    Instruction_aarch64::patch(branch+8, 20, 5, (dest >>= 16) & 0xffff);
+    assert(pd_call_destination(branch) == target, "should be");
   } else if (Instruction_aarch64::extract(insn, 31, 22) == 0b1011100101 &&
              Instruction_aarch64::extract(insn, 4, 0) == 0b11111) {
     // nothing to do
     assert(target == 0, "did not expect to relocate target for polling page load");
   } else {
     ShouldNotReachHere();
+  }
+}
+
+void MacroAssembler::patch_oop(address insn_addr, address o) {
+  unsigned insn = *(unsigned*)insn_addr;
+  if (Instruction_aarch64::extract(insn, 31, 21) == 0b11010010101) {
+      // Move narrow constant
+      assert(nativeInstruction_at(insn_addr+4)->is_movk(), "wrong insns in patch");
+      narrowOop n = oopDesc::encode_heap_oop((oop)o);
+      Instruction_aarch64::patch(insn_addr, 20, 5, n >> 16);
+      Instruction_aarch64::patch(insn_addr+4, 20, 5, n & 0xffff);
+  } else {
+    pd_patch_instruction(insn_addr, o);
   }
 }
 
@@ -216,14 +232,13 @@ address MacroAssembler::target_addr_for_insn(address insn_addr, unsigned insn) {
       ShouldNotReachHere();
     }
   } else if (Instruction_aarch64::extract(insn, 31, 23) == 0b110100101) {
-    // Move wide constant
-    // FIXME: We assume these instructions are movz, movk, movk, movk.
-    // We don't assert this; we should.
     u_int32_t *insns = (u_int32_t *)insn_addr;
+    // Move wide constant: movz, movk, movk.  See movptr().
+    assert(nativeInstruction_at(insns+1)->is_movk(), "wrong insns in patch");
+    assert(nativeInstruction_at(insns+2)->is_movk(), "wrong insns in patch");
     return address(u_int64_t(Instruction_aarch64::extract(insns[0], 20, 5))
 		   + (u_int64_t(Instruction_aarch64::extract(insns[1], 20, 5)) << 16)
-		   + (u_int64_t(Instruction_aarch64::extract(insns[2], 20, 5)) << 32)
-		   + (u_int64_t(Instruction_aarch64::extract(insns[3], 20, 5)) << 48));
+		   + (u_int64_t(Instruction_aarch64::extract(insns[2], 20, 5)) << 32));
   } else if (Instruction_aarch64::extract(insn, 31, 22) == 0b1011100101 &&
              Instruction_aarch64::extract(insn, 4, 0) == 0b11111) {
     return 0;
@@ -607,9 +622,10 @@ void MacroAssembler::call(Address entry) {
 
 void MacroAssembler::ic_call(address entry) {
   RelocationHolder rh = virtual_call_Relocation::spec(pc());
-  address const_ptr = long_constant((jlong)Universe::non_oop_word());
-  unsigned long offset;
-  ldr_constant(rscratch2, const_ptr);
+  // address const_ptr = long_constant((jlong)Universe::non_oop_word());
+  // unsigned long offset;
+  // ldr_constant(rscratch2, const_ptr);
+  movptr(rscratch2, (uintptr_t)Universe::non_oop_word());
   call(Address(entry, rh));
 }
 
@@ -1247,10 +1263,14 @@ void MacroAssembler::mov(Register r, Address dest) {
   InstructionMark im(this);
   code_section()->relocate(inst_mark(), dest.rspec());
   u_int64_t imm64 = (u_int64_t)dest.target();
-  mov64(r, imm64);
+  movptr(r, imm64);
 }
 
-void MacroAssembler::mov64(Register r, uintptr_t imm64) {
+// Move a constant pointer into r.  In AArch64 mode the virtual
+// address space is 48 bits in size, so we only need three
+// instructions to create a patchable instruction sequence that can
+// reach anywhere.
+void MacroAssembler::movptr(Register r, uintptr_t imm64) {
 #ifndef PRODUCT
   {
     char buffer[64];
@@ -1258,13 +1278,12 @@ void MacroAssembler::mov64(Register r, uintptr_t imm64) {
     block_comment(buffer);
   }
 #endif
+  assert(imm64 < (1ul << 48), "48-bit overflow in address constant");
   movz(r, imm64 & 0xffff);
   imm64 >>= 16;
   movk(r, imm64 & 0xffff, 16);
   imm64 >>= 16;
   movk(r, imm64 & 0xffff, 32);
-  imm64 >>= 16;
-  movk(r, imm64 & 0xffff, 48);
 }
 
 void MacroAssembler::mov_immediate64(Register dst, u_int64_t imm64)
@@ -1824,8 +1843,12 @@ void MacroAssembler::addw(Register Rd, Register Rn, RegisterOrConstant increment
 void MacroAssembler::reinit_heapbase()
 {
   if (UseCompressedOops) {
-    lea(rheapbase, ExternalAddress((address)Universe::narrow_ptrs_base_addr()));
-    ldr(rheapbase, Address(rheapbase));
+    if (Universe::is_fully_initialized()) {
+      mov(rheapbase, Universe::narrow_ptrs_base());
+    } else {
+      lea(rheapbase, ExternalAddress((address)Universe::narrow_ptrs_base_addr()));
+      ldr(rheapbase, Address(rheapbase));
+    }
   }
 }
 
@@ -2153,14 +2176,202 @@ void MacroAssembler::update_word_crc32(Register crc, Register v, Register tmp,
 void MacroAssembler::kernel_crc32(Register crc, Register buf, Register len,
         Register table0, Register table1, Register table2, Register table3,
         Register tmp, Register tmp2, Register tmp3) {
-  Label L_by16_loop, L_by4, L_by4_loop, L_by1, L_by1_loop, L_exit;
+  Label L_by16, L_by16_loop, L_by4, L_by4_loop, L_by1, L_by1_loop, L_exit;
   unsigned long offset;
+
     ornw(crc, zr, crc);
+
+  if (UseCRC32) {
+    Label CRC_by64_loop, CRC_by4_loop, CRC_by1_loop;
+
+      subs(len, len, 64);
+      br(Assembler::GE, CRC_by64_loop);
+      adds(len, len, 64-4);
+      br(Assembler::GE, CRC_by4_loop);
+      adds(len, len, 4);
+      br(Assembler::GT, CRC_by1_loop);
+      b(L_exit);
+
+    BIND(CRC_by4_loop);
+      ldrw(tmp, Address(post(buf, 4)));
+      subs(len, len, 4);
+      crc32w(crc, crc, tmp);
+      br(Assembler::GE, CRC_by4_loop);
+      adds(len, len, 4);
+      br(Assembler::LE, L_exit);
+    BIND(CRC_by1_loop);
+      ldrb(tmp, Address(post(buf, 1)));
+      subs(len, len, 1);
+      crc32b(crc, crc, tmp);
+      br(Assembler::GT, CRC_by1_loop);
+      b(L_exit);
+
+      align(CodeEntryAlignment);
+    BIND(CRC_by64_loop);
+      subs(len, len, 64);
+      ldp(tmp, tmp3, Address(post(buf, 16)));
+      crc32x(crc, crc, tmp);
+      crc32x(crc, crc, tmp3);
+      ldp(tmp, tmp3, Address(post(buf, 16)));
+      crc32x(crc, crc, tmp);
+      crc32x(crc, crc, tmp3);
+      ldp(tmp, tmp3, Address(post(buf, 16)));
+      crc32x(crc, crc, tmp);
+      crc32x(crc, crc, tmp3);
+      ldp(tmp, tmp3, Address(post(buf, 16)));
+      crc32x(crc, crc, tmp);
+      crc32x(crc, crc, tmp3);
+      br(Assembler::GE, CRC_by64_loop);
+      adds(len, len, 64-4);
+      br(Assembler::GE, CRC_by4_loop);
+      adds(len, len, 4);
+      br(Assembler::GT, CRC_by1_loop);
+    BIND(L_exit);
+      ornw(crc, zr, crc);
+      return;
+  }
+
     adrp(table0, ExternalAddress(StubRoutines::crc_table_addr()), offset);
     if (offset) add(table0, table0, offset);
     add(table1, table0, 1*256*sizeof(juint));
     add(table2, table0, 2*256*sizeof(juint));
     add(table3, table0, 3*256*sizeof(juint));
+
+  if (UseNeon) {
+      cmp(len, 64);
+      br(Assembler::LT, L_by16);
+      v_eor(v16, T16B, v16, v16);
+
+    Label L_fold;
+
+      add(tmp, table0, 4*256*sizeof(juint)); // Point at the Neon constants
+
+      v_ld1(v0, v1, T2D, buf, 32);
+      v_ld1r(v4, T2D, tmp, 8);
+      v_ld1r(v5, T2D, tmp, 8);
+      v_ld1r(v6, T2D, tmp, 8);
+      v_ld1r(v7, T2D, tmp, 8);
+      v_mov(v16, T4S, 0, crc);
+
+      v_eor(v0, T16B, v0, v16);
+      sub(len, len, 64);
+
+    BIND(L_fold);
+      v_pmull(v22, T8H, v0, v5, T8B);
+      v_pmull(v20, T8H, v0, v7, T8B);
+      v_pmull(v23, T8H, v0, v4, T8B);
+      v_pmull(v21, T8H, v0, v6, T8B);
+    
+      v_pmull2(v18, T8H, v0, v5, T16B);
+      v_pmull2(v16, T8H, v0, v7, T16B);
+      v_pmull2(v19, T8H, v0, v4, T16B);
+      v_pmull2(v17, T8H, v0, v6, T16B);
+    
+      v_uzp1(v24, v20, v22, T8H);
+      v_uzp2(v25, v20, v22, T8H);
+      v_eor(v20, T16B, v24, v25);
+    
+      v_uzp1(v26, v16, v18, T8H);
+      v_uzp2(v27, v16, v18, T8H);
+      v_eor(v16, T16B, v26, v27);
+    
+      v_ushll2(v22, T4S, v20, T8H, 8);
+      v_ushll(v20, T4S, v20, T4H, 8);
+    
+      v_ushll2(v18, T4S, v16, T8H, 8);
+      v_ushll(v16, T4S, v16, T4H, 8);
+    
+      v_eor(v22, T16B, v23, v22);
+      v_eor(v18, T16B, v19, v18);
+      v_eor(v20, T16B, v21, v20);
+      v_eor(v16, T16B, v17, v16);
+    
+      v_uzp1(v17, v16, v20, T2D);
+      v_uzp2(v21, v16, v20, T2D);
+      v_eor(v17, T16B, v17, v21);
+    
+      v_ushll2(v20, T2D, v17, T4S, 16);
+      v_ushll(v16, T2D, v17, T2S, 16);
+    
+      v_eor(v20, T16B, v20, v22);
+      v_eor(v16, T16B, v16, v18);
+    
+      v_uzp1(v17, v20, v16, T2D);
+      v_uzp2(v21, v20, v16, T2D);
+      v_eor(v28, T16B, v17, v21);
+    
+      v_pmull(v22, T8H, v1, v5, T8B);
+      v_pmull(v20, T8H, v1, v7, T8B);
+      v_pmull(v23, T8H, v1, v4, T8B);
+      v_pmull(v21, T8H, v1, v6, T8B);
+    
+      v_pmull2(v18, T8H, v1, v5, T16B);
+      v_pmull2(v16, T8H, v1, v7, T16B);
+      v_pmull2(v19, T8H, v1, v4, T16B);
+      v_pmull2(v17, T8H, v1, v6, T16B);
+    
+      v_ld1(v0, v1, T2D, buf, 32);
+    
+      v_uzp1(v24, v20, v22, T8H);
+      v_uzp2(v25, v20, v22, T8H);
+      v_eor(v20, T16B, v24, v25);
+    
+      v_uzp1(v26, v16, v18, T8H);
+      v_uzp2(v27, v16, v18, T8H);
+      v_eor(v16, T16B, v26, v27);
+    
+      v_ushll2(v22, T4S, v20, T8H, 8);
+      v_ushll(v20, T4S, v20, T4H, 8);
+    
+      v_ushll2(v18, T4S, v16, T8H, 8);
+      v_ushll(v16, T4S, v16, T4H, 8);
+    
+      v_eor(v22, T16B, v23, v22);
+      v_eor(v18, T16B, v19, v18);
+      v_eor(v20, T16B, v21, v20);
+      v_eor(v16, T16B, v17, v16);
+    
+      v_uzp1(v17, v16, v20, T2D);
+      v_uzp2(v21, v16, v20, T2D);
+      v_eor(v16, T16B, v17, v21);
+    
+      v_ushll2(v20, T2D, v16, T4S, 16);
+      v_ushll(v16, T2D, v16, T2S, 16);
+    
+      v_eor(v20, T16B, v22, v20);
+      v_eor(v16, T16B, v16, v18);
+    
+      v_uzp1(v17, v20, v16, T2D);
+      v_uzp2(v21, v20, v16, T2D);
+      v_eor(v20, T16B, v17, v21);
+    
+      v_shl(v16, v28, T2D, 1);
+      v_shl(v17, v20, T2D, 1);
+    
+      v_eor(v0, T16B, v0, v16);
+      v_eor(v1, T16B, v1, v17);
+
+      subs(len, len, 32);
+      br(Assembler::GE, L_fold);
+
+      mov(crc, 0);
+      v_mov(tmp, v0, T1D, 0);
+      update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, false);
+      update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, true);
+      v_mov(tmp, v0, T1D, 1);
+      update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, false);
+      update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, true);
+      v_mov(tmp, v1, T1D, 0);
+      update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, false);
+      update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, true);
+      v_mov(tmp, v1, T1D, 1);
+      update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, false);
+      update_word_crc32(crc, tmp, tmp2, table0, table1, table2, table3, true);
+
+      add(len, len, 32);
+  }
+
+  BIND(L_by16);
     subs(len, len, 16);
     br(Assembler::GE, L_by16_loop);
     adds(len, len, 16-4);
@@ -2517,29 +2728,33 @@ void  MacroAssembler::decode_klass_not_null(Register r) {
   decode_klass_not_null(r, r);
 }
 
-// TODO
-//
-// these next two methods load a narrow oop or klass constant into a
-// register. they currently do the dumb thing of installing 64 bits of
-// unencoded constant into the register and then encoding it.
-// installing the encoded 32 bit constant directly requires updating
-// the relocation code so it can recognize that this is a 32 bit load
-// rather than a 64 bit load.
-
 void  MacroAssembler::set_narrow_oop(Register dst, jobject obj) {
-  assert (UseCompressedOops, "should only be used for compressed headers");
+  assert (UseCompressedOops, "should only be used for compressed oops");
   assert (Universe::heap() != NULL, "java heap should be initialized");
   assert (oop_recorder() != NULL, "this assembler needs an OopRecorder");
-  movoop(dst, obj);
-  encode_heap_oop_not_null(dst);
-}
 
+  int oop_index = oop_recorder()->find_index(obj);
+  assert(Universe::heap()->is_in_reserved(JNIHandles::resolve(obj)), "should be real oop");
+
+  InstructionMark im(this);
+  RelocationHolder rspec = oop_Relocation::spec(oop_index);
+  code_section()->relocate(inst_mark(), rspec);
+  movz(dst, 0xDEAD, 16);
+  movk(dst, 0xBEEF);
+}
 
 void  MacroAssembler::set_narrow_klass(Register dst, Klass* k) {
   assert (UseCompressedClassPointers, "should only be used for compressed headers");
   assert (oop_recorder() != NULL, "this assembler needs an OopRecorder");
-  mov_metadata(dst, k);
-  encode_klass_not_null(dst);
+  int index = oop_recorder()->find_index(k);
+  assert(! Universe::heap()->is_in_reserved(k), "should not be an oop");
+
+  InstructionMark im(this);
+  RelocationHolder rspec = metadata_Relocation::spec(index);
+  code_section()->relocate(inst_mark(), rspec);
+  narrowKlass nk = Klass::encode_klass(k);
+  movz(dst, (nk >> 16), 16);
+  movk(dst, nk & 0xffff);
 }
 
 void MacroAssembler::load_heap_oop(Register dst, Address src)
@@ -2559,7 +2774,7 @@ void MacroAssembler::load_heap_oop_not_null(Register dst, Address src)
     decode_heap_oop_not_null(dst);
   } else {
     ldr(dst, src);
-  }  
+  }
 }
 
 void MacroAssembler::store_heap_oop(Address dst, Register src) {
@@ -2761,7 +2976,11 @@ Address MacroAssembler::allocate_metadata_address(Metadata* obj) {
   return Address((address)obj, rspec);
 }
 
-void MacroAssembler::movoop(Register dst, jobject obj) {
+// Move an oop into a register.  immediate is true if we want
+// immediate instrcutions, i.e. we are not going to patch this
+// instruction while the code is being executed by another thread.  In
+// that case we can use move immediates rather than the constant pool.
+void MacroAssembler::movoop(Register dst, jobject obj, bool immediate) {
   int oop_index;
   if (obj == NULL) {
     oop_index = oop_recorder()->allocate_oop_index(obj);
@@ -2770,15 +2989,15 @@ void MacroAssembler::movoop(Register dst, jobject obj) {
     assert(Universe::heap()->is_in_reserved(JNIHandles::resolve(obj)), "should be real oop");
   }
   RelocationHolder rspec = oop_Relocation::spec(oop_index);
-  address const_ptr = long_constant((jlong)obj);
-  if (! const_ptr) {
+  if (! immediate) {
+    address dummy = address(uintptr_t(pc()) & -wordSize); // A nearby aligned address
+    ldr_constant(dst, Address(dummy, rspec));
+  } else
     mov(dst, Address((address)obj, rspec));
-  } else {
-    code()->consts()->relocate(const_ptr, rspec);
-    ldr_constant(dst, const_ptr);
-  }
+
 }
 
+// Move a metadata address into a register.
 void MacroAssembler::mov_metadata(Register dst, Metadata* obj) {
   int oop_index;
   if (obj == NULL) {
@@ -2787,13 +3006,7 @@ void MacroAssembler::mov_metadata(Register dst, Metadata* obj) {
     oop_index = oop_recorder()->find_index(obj);
   }
   RelocationHolder rspec = metadata_Relocation::spec(oop_index);
-  address const_ptr = long_constant((jlong)obj);
-  if (! const_ptr) {
-    mov(dst, Address((address)obj, rspec));
-  } else {
-    code()->consts()->relocate(const_ptr, rspec);
-    ldr_constant(dst, const_ptr);
-  }
+  mov(dst, Address((address)obj, rspec));
 }
 
 Address MacroAssembler::constant_oop_address(jobject obj) {
@@ -3080,7 +3293,13 @@ address MacroAssembler::read_polling_page(Register r, relocInfo::relocType rtype
 }
 
 void MacroAssembler::adrp(Register reg1, const Address &dest, unsigned long &byte_offset) {
+  relocInfo::relocType rtype = dest.rspec().reloc()->type();
   if (uabs(pc() - dest.target()) >= (1LL << 32)) {
+    guarantee(rtype == relocInfo::none
+	      || rtype == relocInfo::external_word_type
+	      || rtype == relocInfo::poll_type
+	      || rtype == relocInfo::poll_return_type,
+	      "can only use a fixed address with an ADRP");
     // Out of range.  This doesn't happen very often, but we have to
     // handle it
     mov(reg1, dest);
@@ -3100,3 +3319,198 @@ void MacroAssembler::adrp(Register reg1, const Address &dest, unsigned long &byt
     return UseAcqRelForVolatileFields;
 #endif
   }
+
+void MacroAssembler::build_frame(int framesize) {
+  if (framesize == 0) {
+    // Is this even possible?
+    stp(rfp, lr, Address(pre(sp, -2 * wordSize)));
+  } else if (framesize < ((1 << 9) + 2 * wordSize)) {
+    sub(sp, sp, framesize);
+    stp(rfp, lr, Address(sp, framesize - 2 * wordSize));
+  } else {
+    stp(rfp, lr, Address(pre(sp, -2 * wordSize)));
+    if (framesize < ((1 << 12) + 2 * wordSize))
+      sub(sp, sp, framesize - 2 * wordSize);
+    else {
+      mov(rscratch1, framesize - 2 * wordSize);
+      sub(sp, sp, rscratch1);
+    }
+  }
+}
+
+void MacroAssembler::remove_frame(int framesize) {
+  if (framesize == 0) {
+    ldp(rfp, lr, Address(post(sp, 2 * wordSize)));
+  } else if (framesize < ((1 << 9) + 2 * wordSize)) {
+    ldp(rfp, lr, Address(sp, framesize - 2 * wordSize));
+    add(sp, sp, framesize);
+  } else {
+    if (framesize < ((1 << 12) + 2 * wordSize))
+      add(sp, sp, framesize - 2 * wordSize);
+    else {
+      mov(rscratch1, framesize - 2 * wordSize);
+      add(sp, sp, rscratch1);
+    }
+    ldp(rfp, lr, Address(post(sp, 2 * wordSize)));
+  }
+}
+
+// Compare strings.
+void MacroAssembler::string_compare(Register str1, Register str2,
+                                    Register cnt1, Register cnt2, Register result,
+                                    Register tmp1) {
+  Label LENGTH_DIFF, DONE, SHORT_LOOP, SHORT_STRING,
+    NEXT_WORD, DIFFERENCE;
+
+  BLOCK_COMMENT("string_compare {");
+
+  // Compute the minimum of the string lengths and save the difference.
+  subsw(tmp1, cnt1, cnt2);
+  cselw(cnt2, cnt1, cnt2, Assembler::LE); // min
+
+  // A very short string
+  cmpw(cnt2, 4);
+  br(Assembler::LT, SHORT_STRING);
+
+  // Check if the strings start at the same location.
+  cmp(str1, str2);
+  br(Assembler::EQ, LENGTH_DIFF);
+
+  // Compare longwords
+  {
+    subw(cnt2, cnt2, 4); // The last longword is a special case
+
+    // Move both string pointers to the last longword of their
+    // strings, negate the remaining count, and convert it to bytes.
+    lea(str1, Address(str1, cnt2, Address::uxtw(1)));
+    lea(str2, Address(str2, cnt2, Address::uxtw(1)));
+    sub(cnt2, zr, cnt2, LSL, 1);
+
+    // Loop, loading longwords and comparing them into rscratch2.
+    bind(NEXT_WORD);
+    ldr(result, Address(str1, cnt2));
+    ldr(cnt1, Address(str2, cnt2));
+    adds(cnt2, cnt2, wordSize);
+    eor(rscratch2, result, cnt1);
+    cbnz(rscratch2, DIFFERENCE);
+    br(Assembler::LT, NEXT_WORD);
+
+    // Last longword.  In the case where length == 4 we compare the
+    // same longword twice, but that's still faster than another
+    // conditional branch.
+
+    ldr(result, Address(str1));
+    ldr(cnt1, Address(str2));
+    eor(rscratch2, result, cnt1);
+    cbz(rscratch2, LENGTH_DIFF);
+
+    // Find the first different characters in the longwords and
+    // compute their difference.
+    bind(DIFFERENCE);
+    rev(rscratch2, rscratch2);
+    clz(rscratch2, rscratch2);
+    andr(rscratch2, rscratch2, -16);
+    lsrv(result, result, rscratch2);
+    uxthw(result, result);
+    lsrv(cnt1, cnt1, rscratch2);
+    uxthw(cnt1, cnt1);
+    subw(result, result, cnt1);
+    b(DONE);
+  }
+
+  bind(SHORT_STRING);
+  // Is the minimum length zero?
+  cbz(cnt2, LENGTH_DIFF);
+
+  bind(SHORT_LOOP);
+  load_unsigned_short(result, Address(post(str1, 2)));
+  load_unsigned_short(cnt1, Address(post(str2, 2)));
+  subw(result, result, cnt1);
+  cbnz(result, DONE);
+  sub(cnt2, cnt2, 1);
+  cbnz(cnt2, SHORT_LOOP);
+
+  // Strings are equal up to min length.  Return the length difference.
+  bind(LENGTH_DIFF);
+  mov(result, tmp1);
+
+  // That's it
+  bind(DONE);
+
+  BLOCK_COMMENT("} string_compare");
+}
+
+
+void MacroAssembler::string_equals(Register str1, Register str2,
+				   Register cnt, Register result,
+				   Register tmp1) {
+  Label SAME_CHARS, DONE, SHORT_LOOP, SHORT_STRING,
+    NEXT_WORD;
+
+  const Register tmp2 = rscratch1;
+  assert_different_registers(str1, str2, cnt, result, tmp1, tmp2, rscratch2);
+
+  BLOCK_COMMENT("string_equals {");
+
+  // Start by assuming that the strings are not equal.
+  mov(result, zr);
+
+  // A very short string
+  cmpw(cnt, 4);
+  br(Assembler::LT, SHORT_STRING);
+
+  // Check if the strings start at the same location.
+  cmp(str1, str2);
+  br(Assembler::EQ, SAME_CHARS);
+
+  // Compare longwords
+  {
+    subw(cnt, cnt, 4); // The last longword is a special case
+
+    // Move both string pointers to the last longword of their
+    // strings, negate the remaining count, and convert it to bytes.
+    lea(str1, Address(str1, cnt, Address::uxtw(1)));
+    lea(str2, Address(str2, cnt, Address::uxtw(1)));
+    sub(cnt, zr, cnt, LSL, 1);
+
+    // Loop, loading longwords and comparing them into rscratch2.
+    bind(NEXT_WORD);
+    ldr(tmp1, Address(str1, cnt));
+    ldr(tmp2, Address(str2, cnt));
+    adds(cnt, cnt, wordSize);
+    eor(rscratch2, tmp1, tmp2);
+    cbnz(rscratch2, DONE);
+    br(Assembler::LT, NEXT_WORD);
+
+    // Last longword.  In the case where length == 4 we compare the
+    // same longword twice, but that's still faster than another
+    // conditional branch.
+
+    ldr(tmp1, Address(str1));
+    ldr(tmp2, Address(str2));
+    eor(rscratch2, tmp1, tmp2);
+    cbz(rscratch2, SAME_CHARS);
+    b(DONE);
+  }
+
+  bind(SHORT_STRING);
+  // Is the length zero?
+  cbz(cnt, SAME_CHARS);
+
+  bind(SHORT_LOOP);
+  load_unsigned_short(tmp1, Address(post(str1, 2)));
+  load_unsigned_short(tmp2, Address(post(str2, 2)));
+  subw(tmp1, tmp1, tmp2);
+  cbnz(tmp1, DONE);
+  sub(cnt, cnt, 1);
+  cbnz(cnt, SHORT_LOOP);
+
+  // Strings are equal.
+  bind(SAME_CHARS);
+  mov(result, true);
+
+  // That's it
+  bind(DONE);
+
+  BLOCK_COMMENT("} string_equals");
+}
